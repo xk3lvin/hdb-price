@@ -208,13 +208,15 @@ export async function performHealthCheck(oneMapToken?: string | null): Promise<A
 }
 
 /**
- * Express Handler for GET /api/health
+ * Express & Vercel Serverless Function Handler for GET /api/health
  */
-export async function handleHealthCheck(req: Request, res: Response): Promise<void> {
+export async function handleHealthCheck(req: any, res: any): Promise<void> {
   try {
     const health = await performHealthCheck();
     const httpStatusCode = health.status === 'down' ? 503 : 200;
     res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
     res.status(httpStatusCode).json(health);
   } catch (err: any) {
     res.status(500).json({
@@ -228,11 +230,34 @@ export async function handleHealthCheck(req: Request, res: Response): Promise<vo
 /**
  * Light ping handler for GET /api/health/ping
  */
-export function handlePing(_req: Request, res: Response): void {
+export function handlePing(_req: any, res: any): void {
   res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+  res.setHeader('Access-Control-Allow-Origin', '*');
   res.status(200).json({
     status: 'ok',
     timestamp: new Date().toISOString(),
     uptime: Math.floor(process.uptime()),
   });
+}
+
+/**
+ * Default export required by Vercel Serverless Functions
+ * Invoked when hitting https://hdb-price.vercel.app/api/health
+ */
+export default async function handler(req: any, res: any): Promise<void> {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
+
+  if (req.method === 'OPTIONS') {
+    res.status(200).end();
+    return;
+  }
+
+  // Handle ping if query param or subpath is supplied
+  if (req.query?.ping === 'true' || req.url?.includes('/ping')) {
+    handlePing(req, res);
+    return;
+  }
+
+  await handleHealthCheck(req, res);
 }
