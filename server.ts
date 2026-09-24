@@ -3,6 +3,7 @@ import { createServer as createViteServer } from 'vite';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
+import { apiRouter } from './api/index';
 
 dotenv.config();
 
@@ -90,6 +91,10 @@ async function startServer() {
   const PORT = Number(process.env.PORT) || 3000;
 
   app.use(express.json());
+
+  // Mount API health & status router (/api/health, /api/health/ping, /health)
+  app.use('/api', apiRouter);
+  app.use('/health', apiRouter);
 
   // --- API Routes ---
 

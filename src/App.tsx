@@ -15,7 +15,8 @@ import { Tab03BudgetFinder } from './components/Tab03BudgetFinder';
 import { Tab04Affordability } from './components/Tab04Affordability';
 import { Tab05MapGeocoder } from './components/Tab05MapGeocoder';
 import { TransactionModal } from './components/TransactionModal';
-import { CheckCircle2, Database } from 'lucide-react';
+import { ApiHealthModal } from './components/ApiHealthModal';
+import { CheckCircle2, Database, Activity } from 'lucide-react';
 
 function AppContent() {
   const { isDark } = useTheme();
@@ -28,6 +29,7 @@ function AppContent() {
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [selectedModalRecord, setSelectedModalRecord] = useState<HdbRecord | null>(null);
   const [targetRecordForMap, setTargetRecordForMap] = useState<HdbRecord | null>(null);
+  const [showApiHealthModal, setShowApiHealthModal] = useState<boolean>(false);
 
   // Fetch from data.gov.sg politely
   const loadData = useCallback(async (town?: string, flatType?: string) => {
@@ -176,6 +178,19 @@ function AppContent() {
           </div>
 
           <div className="flex items-center gap-4 text-[11px]">
+            <button
+              onClick={() => setShowApiHealthModal(true)}
+              className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-semibold border transition cursor-pointer ${
+                isDark 
+                  ? 'bg-slate-900 border-slate-700 text-slate-300 hover:border-emerald-500/50 hover:text-emerald-400' 
+                  : 'bg-slate-100 border-slate-200 text-slate-700 hover:border-emerald-500/50 hover:text-emerald-700'
+              }`}
+              title="Inspect Live System & API Health"
+            >
+              <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
+              <span>API Health</span>
+            </button>
+            <span className="hidden sm:inline">•</span>
             <span className="flex items-center gap-1">
               <Database className="w-3.5 h-3.5 text-slate-400" />
               datasetId: d_8b84c4ee58e3cfc0ece0d773c8ca6abc
@@ -185,6 +200,12 @@ function AppContent() {
           </div>
         </div>
       </footer>
+
+      {/* Live System & API Health Modal */}
+      <ApiHealthModal
+        isOpen={showApiHealthModal}
+        onClose={() => setShowApiHealthModal(false)}
+      />
     </div>
   );
 }
