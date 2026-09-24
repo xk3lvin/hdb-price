@@ -5,8 +5,7 @@ import { useTheme } from '../context/ThemeContext';
 import { 
   geocodeHdbBlock, 
   searchSingaporeAddress, 
-  SG_TOWN_COORDINATES, 
-  GeocodedLocation 
+  SG_TOWN_COORDINATES 
 } from '../services/geocoder';
 import {
   getStoredOneMapToken,
@@ -17,15 +16,27 @@ import {
   OneMapRouteResult
 } from '../services/onemapService';
 import { 
+  getAmenitiesWithinRadius, 
+  calculateDistanceMeters, 
+  NearbyAmenity 
+} from '../services/amenitiesService';
+import { NearbyAmenitiesPanel } from './NearbyAmenitiesPanel';
+import { CustomRoutePlanner, RouteTransitMode, CalculatedRouteState } from './CustomRoutePlanner';
+import { 
   Search, 
   MapPin, 
   Navigation, 
   Layers, 
   RefreshCw, 
-  Route,
-  Footprints,
-  Car,
-  Compass
+  Route, 
+  Footprints, 
+  Car, 
+  Compass,
+  GraduationCap,
+  Train,
+  Sparkles,
+  Award,
+  X
 } from 'lucide-react';
 
 interface Tab05MapGeocoderProps {
@@ -97,6 +108,9 @@ export const Tab05MapGeocoder: React.FC<Tab05MapGeocoderProps> = ({
   const markersLayerRef = useRef<L.LayerGroup | null>(null);
   const searchPinLayerRef = useRef<L.LayerGroup | null>(null);
   const routeLayerRef = useRef<L.Polyline | null>(null);
+  const radiusCircleLayerRef = useRef<L.Circle | null>(null);
+  const amenitiesLayerRef = useRef<L.LayerGroup | null>(null);
+  const destinationMarkerRef = useRef<L.Marker | null>(null);
 
   const [searchQuery, setSearchQuery] = useState('');
   const [isSearching, setIsSearching] = useState(false);
@@ -108,7 +122,7 @@ export const Tab05MapGeocoder: React.FC<Tab05MapGeocoderProps> = ({
   const [selectedBasemap, setSelectedBasemap] = useState<BasemapStyle>(isDark ? 'onemap-night' : 'onemap-default');
   const [userOverrodeBasemap, setUserOverrodeBasemap] = useState(false);
 
-  // OneMap Token Status (powered automatically by environment variable VITE_ONEMAP_TOKEN / ONEMAP_API_TOKEN)
+  // OneMap Token Status
   const [tokenInfo, setTokenInfo] = useState<OneMapTokenInfo>(getStoredOneMapToken());
 
   // Click-to-reverse-geocode state
@@ -121,15 +135,45 @@ export const Tab05MapGeocoder: React.FC<Tab05MapGeocoderProps> = ({
     isLoading: boolean;
   } | null>(null);
 
-  // Routing State
-  const [routeInfo, setRouteInfo] = useState<{
-    distanceKm: number;
-    durationMins: number;
-    routeType: 'walk' | 'drive' | 'pt';
-    destinationName: string;
-    isLoading: boolean;
-    error?: string;
-  } | null>(null);
+  // 1km Radius Amenities State
+  const [selectedRadius, setSelectedRadius] = useState<number>(1000); // 1000m (1km default)
+  const [nearbyAmenities, setNearbyAmenities] = useState<NearbyAmenity[]>([]);
+  const [isAmenitiesPanelOpen, setIsAmenitiesPanelOpen] = useState<boolean>(true);
+
+  // Custom Destination Routing State
+  const [destinationInput, setDestinationInput] = useState<string>('Raffles Place / CBD');
+  const [transitMode, setTransitMode] = useState<RouteTransitMode>('drive');
+  const [calculatedRoute, setCalculatedRoute] = useState<CalculatedRouteState | null>(null);
+  const [isCalculatingRoute, setIsCalculatingRoute] = useState<boolean>(false);
+
+  // Active Origin for Amenities & Routing
+  const activeOrigin = useMemo(() => {
+    if (selectedBlockData) {
+      return {
+        name: `Blk ${selectedBlockData.block} ${selectedBlockData.street_name}`,
+        lat: selectedBlockData.lat,
+        lng: selectedBlockData.lng,
+        isBlock: true,
+      };
+    }
+    if (clickedLocation) {
+      return {
+        name: clickedLocation.building || clickedLocation.address || 'Selected Map Location',
+        lat: clickedLocation.lat,
+        lng: clickedLocation.lng,
+        isBlock: false,
+      };
+    }
+    if (plottedBlocks.length > 0) {
+      return {
+        name: `Blk ${plottedBlocks[0].block} ${plottedBlocks[0].street_name}`,
+        lat: plottedBlocks[0].lat,
+        lng: plottedBlocks[0].lng,
+        isBlock: true,
+      };
+    }
+    return null;
+  }, [selectedBlockData, clickedLocation, plottedBlocks]);
 
   // Auto-initialize token from environment or server backend
   useEffect(() => {
@@ -205,8 +249,7 @@ export const Tab05MapGeocoder: React.FC<Tab05MapGeocoderProps> = ({
 
   // 1. Initialize Leaflet Map
   useEffect(() => {
-    if (!mapContainerRef.current) return;
-    if (mapInstanceRef.current) return;
+    if (!mapContainerRef.current || mapInstanceRef.current) return;
 
     const map = L.map(mapContainerRef.current, {
       center: [1.3521, 103.8198],
@@ -227,9 +270,11 @@ export const Tab05MapGeocoder: React.FC<Tab05MapGeocoderProps> = ({
 
     const markersGroup = L.layerGroup().addTo(map);
     const searchGroup = L.layerGroup().addTo(map);
+    const amenitiesGroup = L.layerGroup().addTo(map);
 
     markersLayerRef.current = markersGroup;
     searchPinLayerRef.current = searchGroup;
+    amenitiesLayerRef.current = amenitiesGroup;
     mapInstanceRef.current = map;
 
     // Click handler on map: Trigger Reverse Geocoding
@@ -408,6 +453,106 @@ export const Tab05MapGeocoder: React.FC<Tab05MapGeocoderProps> = ({
     });
   }, [targetRecord, plottedBlocks]);
 
+  // 4. Update 1km Radius Overlay and Amenities Pins when activeOrigin or selectedRadius changes
+  useEffect(() => {
+    if (!activeOrigin || !mapInstanceRef.current) return;
+
+    const { lat, lng } = activeOrigin;
+
+    // Calculate amenities within chosen radius
+    const items = getAmenitiesWithinRadius(lat, lng, selectedRadius);
+    setNearbyAmenities(items);
+
+    // 1. Draw radius circle overlay
+    if (radiusCircleLayerRef.current) {
+      radiusCircleLayerRef.current.remove();
+    }
+    const circle = L.circle([lat, lng], {
+      radius: selectedRadius,
+      color: '#f43f5e',
+      fillColor: '#f43f5e',
+      fillOpacity: 0.08,
+      weight: 2,
+      dashArray: '6, 6',
+    }).addTo(mapInstanceRef.current);
+    radiusCircleLayerRef.current = circle;
+
+    // 2. Draw amenity pins inside circle
+    if (amenitiesLayerRef.current) {
+      amenitiesLayerRef.current.clearLayers();
+
+      items.forEach(amenity => {
+        let pinBg = '#6366f1';
+        let iconEmoji = '🏫';
+
+        if (amenity.category === 'mrt') {
+          pinBg = '#10b981';
+          iconEmoji = '🚇';
+        } else if (amenity.category === 'shopping') {
+          pinBg = '#f59e0b';
+          iconEmoji = '🛍️';
+        } else if (amenity.category === 'food') {
+          pinBg = '#f97316';
+          iconEmoji = '🍲';
+        } else if (amenity.category === 'health') {
+          pinBg = '#ef4444';
+          iconEmoji = '🏥';
+        } else if (amenity.category === 'park') {
+          pinBg = '#14b8a6';
+          iconEmoji = '🌳';
+        }
+
+        const isP1 = amenity.category === 'school' && amenity.subCategory === 'primary_school' && amenity.distanceMeters <= 1000;
+
+        const amenityIcon = L.divIcon({
+          html: `
+            <div class="group relative cursor-pointer transform hover:scale-125 transition-transform duration-150">
+              <div style="background-color: ${pinBg}; box-shadow: 0 0 8px ${pinBg}88;" class="w-6 h-6 rounded-full border border-white flex items-center justify-center text-[10px] shadow-md">
+                <span>${iconEmoji}</span>
+              </div>
+              ${isP1 ? `<div class="absolute -top-1 -right-1 w-2.5 h-2.5 bg-yellow-400 rounded-full border border-white" title="MOE P1 Priority"></div>` : ''}
+            </div>
+          `,
+          className: 'custom-amenity-pin',
+          iconSize: [24, 24],
+          iconAnchor: [12, 12],
+        });
+
+        const m = L.marker([amenity.lat, amenity.lng], { icon: amenityIcon });
+
+        // Popup with details and direct "Route Here" button
+        const popupContent = document.createElement('div');
+        popupContent.className = 'text-xs font-sans p-1 min-w-[190px]';
+        popupContent.innerHTML = `
+          <div class="font-bold text-slate-900 text-xs">${amenity.name}</div>
+          <div class="text-[10px] text-slate-500 mt-0.5">${amenity.description || amenity.category}</div>
+          <div class="flex items-center justify-between border-t border-slate-200 mt-1.5 pt-1 text-[11px]">
+            <span class="font-bold text-rose-600">${amenity.distanceMeters}m away</span>
+            <span class="text-slate-500">~${amenity.walkTimeMins} mins walk</span>
+          </div>
+          ${isP1 ? `<div class="mt-1 bg-indigo-50 text-indigo-700 font-bold text-[10px] px-1.5 py-0.5 rounded border border-indigo-200">⭐ MOE P1 &le;1km Priority</div>` : ''}
+          <button id="route-btn-${amenity.id}" class="mt-2 w-full py-1 rounded bg-rose-600 hover:bg-rose-500 text-white font-bold text-[11px] cursor-pointer shadow-xs transition">
+            Route Here
+          </button>
+        `;
+
+        m.bindPopup(popupContent);
+        m.on('popupopen', () => {
+          const btn = document.getElementById(`route-btn-${amenity.id}`);
+          if (btn) {
+            btn.onclick = () => {
+              setDestinationInput(amenity.name);
+              handleCalculateCustomRoute(amenity.name, transitMode, { lat: amenity.lat, lng: amenity.lng });
+              m.closePopup();
+            };
+          }
+        });
+
+        amenitiesLayerRef.current?.addLayer(m);
+      });
+    }
+  }, [activeOrigin, selectedRadius]);
+
   // Address search form submission
   const handleAddressSearch = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -453,67 +598,195 @@ export const Tab05MapGeocoder: React.FC<Tab05MapGeocoderProps> = ({
     }
   };
 
-  // Calculate OneMap SLA Route (e.g. from current block to Raffles Place / CBD)
-  const handleCalculateRoute = async (startLat: number, startLng: number, routeType: 'walk' | 'drive' | 'pt') => {
-    // Raffles Place (CBD / financial center coordinates)
-    const endLat = 1.284349;
-    const endLng = 103.851072;
-    const destName = 'Raffles Place / CBD';
+  // Calculate Custom OneMap Route to user-specified destination
+  const handleCalculateCustomRoute = async (
+    destQueryOrName: string,
+    mode: RouteTransitMode,
+    presetCoords?: { lat: number; lng: number }
+  ) => {
+    if (!activeOrigin) {
+      return;
+    }
 
-    setRouteInfo({
+    const startLat = activeOrigin.lat;
+    const startLng = activeOrigin.lng;
+    const startName = activeOrigin.name;
+
+    setIsCalculatingRoute(true);
+    let endLat: number | null = presetCoords?.lat ?? null;
+    let endLng: number | null = presetCoords?.lng ?? null;
+    let destTitle = destQueryOrName;
+
+    // If destination coordinates not provided, search and geocode
+    if (!endLat || !endLng) {
+      try {
+        const results = await searchSingaporeAddress(destQueryOrName);
+        if (results.length > 0) {
+          endLat = results[0].lat;
+          endLng = results[0].lng;
+          destTitle = results[0].building || results[0].address || destQueryOrName;
+        }
+      } catch {}
+    }
+
+    if (!endLat || !endLng) {
+      setCalculatedRoute({
+        distanceKm: 0,
+        durationMins: 0,
+        routeType: mode,
+        destinationName: destQueryOrName,
+        destinationCoords: { lat: 0, lng: 0 },
+        startName,
+        startCoords: { lat: startLat, lng: startLng },
+        isLoading: false,
+        error: `Could not locate destination "${destQueryOrName}". Please try searching with a more specific building, MRT, or postal code.`,
+      });
+      setIsCalculatingRoute(false);
+      return;
+    }
+
+    // Set loading state
+    setCalculatedRoute({
       distanceKm: 0,
       durationMins: 0,
-      routeType,
-      destinationName: destName,
+      routeType: mode,
+      destinationName: destTitle,
+      destinationCoords: { lat: endLat, lng: endLng },
+      startName,
+      startCoords: { lat: startLat, lng: startLng },
       isLoading: true,
     });
 
     try {
-      const routeRes: OneMapRouteResult = await getOneMapRoute(startLat, startLng, endLat, endLng, routeType);
+      const routeRes: OneMapRouteResult = await getOneMapRoute(startLat, startLng, endLat, endLng, mode);
 
       if (routeRes.route_summary && mapInstanceRef.current) {
         const distKm = Number((routeRes.route_summary.total_distance / 1000).toFixed(2));
         const durMins = Math.round(routeRes.route_summary.total_time / 60);
 
-        setRouteInfo({
+        setCalculatedRoute({
           distanceKm: distKm,
           durationMins: durMins,
-          routeType,
-          destinationName: destName,
+          routeType: mode,
+          destinationName: destTitle,
+          destinationCoords: { lat: endLat, lng: endLng },
+          startName,
+          startCoords: { lat: startLat, lng: startLng },
           isLoading: false,
         });
 
-        // Draw Route Geometry if available
+        // Clear previous route layers
+        if (routeLayerRef.current) {
+          routeLayerRef.current.remove();
+        }
+        if (destinationMarkerRef.current) {
+          destinationMarkerRef.current.remove();
+        }
+
+        // Add destination marker flag
+        const destIcon = L.divIcon({
+          html: `
+            <div class="relative flex flex-col items-center">
+              <div class="bg-indigo-600 text-white font-bold text-[11px] px-2 py-0.5 rounded-lg shadow-xl border border-white whitespace-nowrap">
+                🏁 ${destTitle}
+              </div>
+              <div class="w-2.5 h-2.5 bg-indigo-600 transform rotate-45 -mt-1 shadow"></div>
+            </div>
+          `,
+          className: 'custom-dest-pin',
+          iconSize: [120, 36],
+          iconAnchor: [60, 36],
+        });
+        destinationMarkerRef.current = L.marker([endLat, endLng], { icon: destIcon }).addTo(mapInstanceRef.current);
+
+        // Draw polyline
         if (routeRes.route_geometry) {
-          if (routeLayerRef.current) {
-            routeLayerRef.current.remove();
-          }
           const coords = decodePolyline(routeRes.route_geometry);
           if (coords.length > 0) {
+            const color = mode === 'walk' ? '#10b981' : mode === 'drive' ? '#3b82f6' : '#8b5cf6';
             const poly = L.polyline(coords, {
-              color: routeType === 'walk' ? '#10b981' : '#3b82f6',
+              color,
               weight: 5,
               opacity: 0.85,
-              dashArray: routeType === 'walk' ? '4, 8' : undefined,
+              dashArray: mode === 'walk' ? '4, 8' : undefined,
             }).addTo(mapInstanceRef.current);
             routeLayerRef.current = poly;
             mapInstanceRef.current.fitBounds(poly.getBounds(), { padding: [60, 60] });
           }
         }
       } else {
-        setRouteInfo(prev => prev ? {
-          ...prev,
+        // Fallback straight-line estimate if OneMap routing endpoint encounters limits
+        const distM = calculateDistanceMeters(startLat, startLng, endLat, endLng);
+        const distKm = Number((distM / 1000).toFixed(2));
+        const speedKmH = mode === 'walk' ? 4.8 : mode === 'drive' ? 36 : 22;
+        const durMins = Math.max(2, Math.round((distKm / speedKmH) * 60));
+
+        setCalculatedRoute({
+          distanceKm: distKm,
+          durationMins: durMins,
+          routeType: mode,
+          destinationName: destTitle,
+          destinationCoords: { lat: endLat, lng: endLng },
+          startName,
+          startCoords: { lat: startLat, lng: startLng },
           isLoading: false,
-          error: routeRes.error || 'Route not found or token expired. Please verify OneMap token.',
-        } : null);
+        });
+
+        if (routeLayerRef.current) routeLayerRef.current.remove();
+        if (destinationMarkerRef.current) destinationMarkerRef.current.remove();
+
+        const destIcon = L.divIcon({
+          html: `
+            <div class="relative flex flex-col items-center">
+              <div class="bg-indigo-600 text-white font-bold text-[11px] px-2 py-0.5 rounded-lg shadow-xl border border-white whitespace-nowrap">
+                🏁 ${destTitle}
+              </div>
+              <div class="w-2.5 h-2.5 bg-indigo-600 transform rotate-45 -mt-1 shadow"></div>
+            </div>
+          `,
+          className: 'custom-dest-pin',
+          iconSize: [120, 36],
+          iconAnchor: [60, 36],
+        });
+        destinationMarkerRef.current = L.marker([endLat, endLng], { icon: destIcon }).addTo(mapInstanceRef.current!);
+
+        const poly = L.polyline([[startLat, startLng], [endLat, endLng]], {
+          color: mode === 'walk' ? '#10b981' : mode === 'drive' ? '#3b82f6' : '#8b5cf6',
+          weight: 4,
+          dashArray: '5, 8',
+          opacity: 0.8,
+        }).addTo(mapInstanceRef.current!);
+        routeLayerRef.current = poly;
+        mapInstanceRef.current!.fitBounds(poly.getBounds(), { padding: [60, 60] });
       }
     } catch (err: any) {
-      setRouteInfo(prev => prev ? {
+      setCalculatedRoute(prev => prev ? {
         ...prev,
         isLoading: false,
         error: err.message || 'Route service request failed.',
       } : null);
+    } finally {
+      setIsCalculatingRoute(false);
     }
+  };
+
+  // Clear route
+  const handleClearRoute = () => {
+    if (routeLayerRef.current) {
+      routeLayerRef.current.remove();
+      routeLayerRef.current = null;
+    }
+    if (destinationMarkerRef.current) {
+      destinationMarkerRef.current.remove();
+      destinationMarkerRef.current = null;
+    }
+    setCalculatedRoute(null);
+  };
+
+  // Focus specific amenity on map
+  const handleFocusAmenity = (amenity: NearbyAmenity) => {
+    if (!mapInstanceRef.current) return;
+    mapInstanceRef.current.flyTo([amenity.lat, amenity.lng], 16, { duration: 1 });
   };
 
   return (
@@ -548,7 +821,7 @@ export const Tab05MapGeocoder: React.FC<Tab05MapGeocoderProps> = ({
               </div>
             </div>
             <p className={`text-xs mt-0.5 ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>
-              Search any Singapore postal code, block, or street. Click anywhere on the map to reverse-geocode SLA addresses.
+              Search any Singapore postal code, block, or street. Click any block to view 1km schools (MOE P1 priority) and calculate routes to any destination.
             </p>
           </div>
 
@@ -650,7 +923,7 @@ export const Tab05MapGeocoder: React.FC<Tab05MapGeocoderProps> = ({
       </div>
 
       {/* Map Container & Overlays */}
-      <div className={`relative rounded-2xl overflow-hidden border shadow-xl h-[600px] ${
+      <div className={`relative rounded-2xl overflow-hidden border shadow-xl h-[620px] ${
         isDark ? 'border-slate-800 bg-slate-950' : 'border-slate-300 bg-slate-100'
       }`}>
         {/* Leaflet DOM Mount */}
@@ -678,7 +951,7 @@ export const Tab05MapGeocoder: React.FC<Tab05MapGeocoderProps> = ({
             <span>&lt; $650k (Entry / Mid)</span>
           </div>
           <div className="text-[10px] text-slate-400 pt-1 border-t border-slate-800/40">
-            Tip: Click anywhere to reverse-geocode!
+            ⭕ Red circle: 1km Radius Zone
           </div>
         </div>
 
@@ -723,10 +996,13 @@ export const Tab05MapGeocoder: React.FC<Tab05MapGeocoderProps> = ({
 
                 <div className="pt-2 flex gap-2">
                   <button
-                    onClick={() => handleCalculateRoute(clickedLocation.lat, clickedLocation.lng, 'walk')}
-                    className="flex-1 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-semibold text-[11px] flex items-center justify-center gap-1 cursor-pointer"
+                    onClick={() => {
+                      setDestinationInput('Raffles Place / CBD');
+                      handleCalculateCustomRoute('Raffles Place / CBD', transitMode, { lat: 1.2839, lng: 103.8515 });
+                    }}
+                    className="flex-1 py-1.5 rounded-lg bg-rose-600 hover:bg-rose-500 text-white font-semibold text-[11px] flex items-center justify-center gap-1 cursor-pointer shadow-xs"
                   >
-                    <Footprints className="w-3 h-3" />
+                    <Navigation className="w-3 h-3" />
                     <span>Route to CBD</span>
                   </button>
                 </div>
@@ -735,54 +1011,9 @@ export const Tab05MapGeocoder: React.FC<Tab05MapGeocoderProps> = ({
           </div>
         )}
 
-        {/* Route Calculation Result Overlay */}
-        {routeInfo && (
-          <div className={`absolute top-20 right-4 z-20 p-3.5 rounded-2xl border shadow-xl backdrop-blur-md text-xs max-w-xs animate-in fade-in duration-200 ${
-            isDark 
-              ? 'bg-slate-900/95 border-emerald-500/40 text-slate-100' 
-              : 'bg-white/95 border-emerald-300 text-slate-800'
-          }`}>
-            <div className="flex items-center justify-between font-bold text-emerald-500 pb-1 border-b border-slate-800/40">
-              <span className="flex items-center gap-1.5">
-                <Route className="w-4 h-4" />
-                OneMap SLA Routing
-              </span>
-              <button
-                onClick={() => setRouteInfo(null)}
-                className="text-slate-400 hover:text-white"
-              >
-                ✕
-              </button>
-            </div>
-
-            {routeInfo.isLoading ? (
-              <div className="flex items-center gap-2 py-2 text-slate-400">
-                <RefreshCw className="w-4 h-4 animate-spin text-emerald-500" />
-                <span>Computing SLA route...</span>
-              </div>
-            ) : routeInfo.error ? (
-              <div className="text-rose-400 py-1.5 text-[11px]">
-                {routeInfo.error}
-              </div>
-            ) : (
-              <div className="space-y-1 pt-1.5">
-                <div className="text-[11px] text-slate-400">Destination: {routeInfo.destinationName}</div>
-                <div className="flex items-baseline justify-between">
-                  <div className="text-base font-black text-emerald-500 font-mono">
-                    ~{routeInfo.durationMins} mins
-                  </div>
-                  <div className="text-xs text-slate-400 font-mono">
-                    {routeInfo.distanceKm} km ({routeInfo.routeType})
-                  </div>
-                </div>
-              </div>
-            )}
-          </div>
-        )}
-
-        {/* Selected Block Info Drawer */}
+        {/* Selected Block Quick Card (Bottom Left) */}
         {selectedBlockData && (
-          <div className={`absolute bottom-4 left-4 right-4 sm:left-auto sm:right-4 sm:w-96 z-20 p-4 rounded-2xl border shadow-2xl backdrop-blur-md text-xs animate-in slide-in-from-bottom-3 duration-200 ${
+          <div className={`absolute bottom-4 left-4 z-20 p-4 rounded-2xl border shadow-2xl backdrop-blur-md text-xs max-w-sm w-[92%] sm:w-88 animate-in slide-in-from-bottom-3 duration-200 ${
             isDark 
               ? 'bg-slate-900/95 border-slate-700 text-slate-100' 
               : 'bg-white/95 border-slate-300 text-slate-800'
@@ -792,7 +1023,7 @@ export const Tab05MapGeocoder: React.FC<Tab05MapGeocoderProps> = ({
                 <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-rose-500/20 text-rose-500 uppercase">
                   {selectedBlockData.town}
                 </span>
-                <h3 className={`text-base font-bold mt-1 ${isDark ? 'text-white' : 'text-slate-900'}`}>
+                <h3 className={`text-sm sm:text-base font-bold mt-1 ${isDark ? 'text-white' : 'text-slate-900'}`}>
                   Blk {selectedBlockData.block} {selectedBlockData.street_name}
                 </h3>
               </div>
@@ -804,10 +1035,10 @@ export const Tab05MapGeocoder: React.FC<Tab05MapGeocoderProps> = ({
               </button>
             </div>
 
-            <div className={`mt-3 pt-2 border-t flex justify-between items-baseline ${isDark ? 'border-slate-800' : 'border-slate-200'}`}>
+            <div className={`mt-2.5 pt-2 border-t flex justify-between items-baseline ${isDark ? 'border-slate-800' : 'border-slate-200'}`}>
               <div>
-                <div className="text-[10px] text-slate-400">Price Range (Recent Sales)</div>
-                <div className="text-base font-black text-rose-500">
+                <div className="text-[10px] text-slate-400">Price Range</div>
+                <div className="text-sm font-black text-rose-500">
                   ${selectedBlockData.minPrice.toLocaleString()}{' '}
                   {selectedBlockData.minPrice !== selectedBlockData.maxPrice && (
                     <span className="text-xs font-normal opacity-80">
@@ -818,59 +1049,85 @@ export const Tab05MapGeocoder: React.FC<Tab05MapGeocoderProps> = ({
               </div>
               <div className="text-right">
                 <div className="text-[10px] text-slate-400">Transacted Flats</div>
-                <div className={`text-sm font-bold font-mono ${isDark ? 'text-white' : 'text-slate-900'}`}>
+                <div className={`text-xs font-bold font-mono ${isDark ? 'text-white' : 'text-slate-900'}`}>
                   {selectedBlockData.flats.length} units
                 </div>
               </div>
             </div>
 
-            {/* SLA Routing Action */}
-            <div className="mt-2.5 pt-2 border-t border-slate-800/40 flex gap-2">
-              <button
-                onClick={() => handleCalculateRoute(selectedBlockData.lat, selectedBlockData.lng, 'walk')}
-                className="flex-1 py-1.5 rounded-lg bg-emerald-600/90 hover:bg-emerald-600 text-white font-semibold text-[11px] flex items-center justify-center gap-1 cursor-pointer"
-              >
-                <Footprints className="w-3 h-3" />
-                <span>Walk to CBD</span>
-              </button>
-              <button
-                onClick={() => handleCalculateRoute(selectedBlockData.lat, selectedBlockData.lng, 'drive')}
-                className="flex-1 py-1.5 rounded-lg bg-blue-600/90 hover:bg-blue-600 text-white font-semibold text-[11px] flex items-center justify-center gap-1 cursor-pointer"
-              >
-                <Car className="w-3 h-3" />
-                <span>Drive to CBD</span>
-              </button>
+            {/* 1km Radius Quick Summary */}
+            <div className="mt-2.5 p-2 rounded-xl bg-slate-800/40 border border-slate-700/50 flex items-center justify-between text-[11px]">
+              <div className="flex items-center gap-1.5 text-rose-400 font-semibold">
+                <Sparkles className="w-3.5 h-3.5 text-rose-500" />
+                <span>1km Amenities:</span>
+              </div>
+              <span className="font-mono font-bold text-white">
+                {nearbyAmenities.length} within {selectedRadius >= 1000 ? `${selectedRadius/1000}km` : `${selectedRadius}m`}
+              </span>
             </div>
 
-            {/* List of transactions in this block */}
-            <div className="mt-3 max-h-36 overflow-y-auto space-y-2 pr-1">
-              {selectedBlockData.flats.map(flat => (
+            {/* List of recent transactions */}
+            <div className="mt-2.5 max-h-28 overflow-y-auto space-y-1.5 pr-1">
+              {selectedBlockData.flats.slice(0, 4).map(flat => (
                 <div
                   key={flat._id}
                   onClick={() => onSelectRecord(flat)}
-                  className={`p-2 rounded-lg border cursor-pointer flex items-center justify-between transition ${
+                  className={`p-1.5 rounded-lg border cursor-pointer flex items-center justify-between transition ${
                     isDark 
                       ? 'bg-slate-800/80 hover:bg-slate-800 border-slate-700/60' 
                       : 'bg-slate-50 hover:bg-slate-100 border-slate-200'
                   }`}
                 >
-                  <div>
-                    <div className={`font-semibold ${isDark ? 'text-white' : 'text-slate-900'}`}>
-                      {flat.flat_type} • {flat.floor_area_num} sqm
-                    </div>
-                    <div className="text-[10px] text-slate-400">
-                      Flr {flat.storey_range} • {flat.remaining_lease}
-                    </div>
+                  <div className="truncate pr-1">
+                    <span className={`font-semibold ${isDark ? 'text-white' : 'text-slate-900'}`}>
+                      {flat.flat_type}
+                    </span>
+                    <span className="text-[10px] text-slate-400 ml-1">
+                      {flat.floor_area_num} sqm • Flr {flat.storey_range}
+                    </span>
                   </div>
-                  <div className="text-right">
-                    <div className="font-bold text-rose-500">${flat.price_num.toLocaleString()}</div>
-                    <div className="text-[10px] text-amber-500 font-mono">${flat.psm}/sqm</div>
-                  </div>
+                  <div className="font-bold text-rose-500 shrink-0">${flat.price_num.toLocaleString()}</div>
                 </div>
               ))}
             </div>
           </div>
         )}
+      </div>
+
+      {/* Two-Column Grid: Custom Route Planner & 1km Radius Amenities */}
+      <div className="grid grid-cols-1 lg:grid-cols-12 gap-4">
+        {/* Custom Route Planner (5 cols on lg) */}
+        <div className="lg:col-span-5">
+          <CustomRoutePlanner
+            originName={activeOrigin?.name || 'Selected Block'}
+            originCoords={activeOrigin ? { lat: activeOrigin.lat, lng: activeOrigin.lng } : null}
+            destinationInput={destinationInput}
+            setDestinationInput={setDestinationInput}
+            transitMode={transitMode}
+            setTransitMode={setTransitMode}
+            onCalculateRoute={handleCalculateCustomRoute}
+            calculatedRoute={calculatedRoute}
+            onClearRoute={handleClearRoute}
+            isCalculating={isCalculatingRoute}
+          />
+        </div>
+
+        {/* 1km Radius Schools & Amenities Explorer Panel (7 cols on lg) */}
+        <div className="lg:col-span-7">
+          <NearbyAmenitiesPanel
+            amenities={nearbyAmenities}
+            selectedRadius={selectedRadius}
+            onChangeRadius={setSelectedRadius}
+            onSelectAmenityForRoute={amenity => {
+              setDestinationInput(amenity.name);
+              handleCalculateCustomRoute(amenity.name, transitMode, { lat: amenity.lat, lng: amenity.lng });
+            }}
+            onFocusAmenityOnMap={handleFocusAmenity}
+            blockLabel={activeOrigin?.name}
+            isOpen={isAmenitiesPanelOpen}
+            onToggleOpen={() => setIsAmenitiesPanelOpen(!isAmenitiesPanelOpen)}
+          />
+        </div>
       </div>
     </div>
   );
