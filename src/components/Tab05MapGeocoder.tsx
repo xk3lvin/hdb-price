@@ -10,9 +10,7 @@ import {
 } from '../services/geocoder';
 import {
   getStoredOneMapToken,
-  saveOneMapToken,
-  clearOneMapToken,
-  mintOneMap3DayToken,
+  initOneMapToken,
   reverseGeocodeOneMap,
   getOneMapRoute,
   OneMapTokenInfo,
@@ -24,20 +22,10 @@ import {
   Navigation, 
   Layers, 
   RefreshCw, 
-  Key,
-  CheckCircle2,
-  AlertCircle,
-  ExternalLink,
-  Lock,
-  Mail,
-  Info,
   Route,
   Footprints,
   Car,
-  Clock,
-  Compass,
-  Building2,
-  Trash2
+  Compass
 } from 'lucide-react';
 
 interface Tab05MapGeocoderProps {
@@ -120,15 +108,7 @@ export const Tab05MapGeocoder: React.FC<Tab05MapGeocoderProps> = ({
   const [selectedBasemap, setSelectedBasemap] = useState<BasemapStyle>(isDark ? 'onemap-night' : 'onemap-default');
   const [userOverrodeBasemap, setUserOverrodeBasemap] = useState(false);
 
-  // OneMap Token Authentication Modal & Status
-  const [showAuthModal, setShowAuthModal] = useState(false);
-  const [authTab, setAuthTab] = useState<'mint' | 'paste' | 'endpoints'>('mint');
-  const [authEmail, setAuthEmail] = useState('xk3lvin@gmail.com');
-  const [authPassword, setAuthPassword] = useState('');
-  const [pastedToken, setPastedToken] = useState('');
-  const [isMintingToken, setIsMintingToken] = useState(false);
-  const [authError, setAuthError] = useState<string | null>(null);
-  const [authSuccess, setAuthSuccess] = useState<string | null>(null);
+  // OneMap Token Status (powered automatically by environment variable VITE_ONEMAP_TOKEN / ONEMAP_API_TOKEN)
   const [tokenInfo, setTokenInfo] = useState<OneMapTokenInfo>(getStoredOneMapToken());
 
   // Click-to-reverse-geocode state
@@ -151,16 +131,15 @@ export const Tab05MapGeocoder: React.FC<Tab05MapGeocoderProps> = ({
     error?: string;
   } | null>(null);
 
-  // Sync token info from storage
-  const syncTokenState = () => {
-    const info = getStoredOneMapToken();
-    setTokenInfo(info);
-    if (info.email) setAuthEmail(info.email);
-  };
-
+  // Auto-initialize token from environment or server backend
   useEffect(() => {
-    syncTokenState();
-    const handleUpdate = () => syncTokenState();
+    initOneMapToken().then(() => {
+      setTokenInfo(getStoredOneMapToken());
+    });
+
+    const handleUpdate = () => {
+      setTokenInfo(getStoredOneMapToken());
+    };
     window.addEventListener('onemap_token_updated', handleUpdate);
     return () => window.removeEventListener('onemap_token_updated', handleUpdate);
   }, []);
@@ -171,60 +150,6 @@ export const Tab05MapGeocoder: React.FC<Tab05MapGeocoderProps> = ({
       setSelectedBasemap(isDark ? 'onemap-night' : 'onemap-default');
     }
   }, [isDark, userOverrodeBasemap]);
-
-  // Handle Token Minting
-  const handleMintToken = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!authEmail.trim() || !authPassword.trim()) {
-      setAuthError('Please provide both email and password.');
-      return;
-    }
-
-    setIsMintingToken(true);
-    setAuthError(null);
-    setAuthSuccess(null);
-
-    try {
-      const result = await mintOneMap3DayToken(authEmail.trim(), authPassword.trim());
-      if (result.success) {
-        setAuthSuccess(`Success! OneMap 3-Day Token minted (~${result.hoursRemaining ?? 72} hours validity).`);
-        setAuthPassword('');
-        syncTokenState();
-        if (tileLayerRef.current) {
-          tileLayerRef.current.redraw();
-        }
-      } else {
-        setAuthError(result.error || 'Failed to authenticate with OneMap.');
-      }
-    } catch (err: any) {
-      setAuthError(err.message || 'Connection error.');
-    } finally {
-      setIsMintingToken(false);
-    }
-  };
-
-  // Handle Pasting Direct Token
-  const handleSavePastedToken = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!pastedToken.trim()) {
-      setAuthError('Please paste a valid OneMap token string.');
-      return;
-    }
-    setAuthError(null);
-    // 3 days duration by default
-    const expiry = Date.now() + 3 * 24 * 60 * 60 * 1000;
-    saveOneMapToken(pastedToken.trim(), expiry, authEmail.trim() || undefined);
-    setPastedToken('');
-    setAuthSuccess('OneMap token saved successfully! Valid for 3 days.');
-    syncTokenState();
-  };
-
-  const handleClearToken = () => {
-    clearOneMapToken();
-    setAuthSuccess(null);
-    setAuthError(null);
-    syncTokenState();
-  };
 
   // Group records by block & street for clean map clustering
   const blockGroups = useMemo(() => {
@@ -605,31 +530,22 @@ export const Tab05MapGeocoder: React.FC<Tab05MapGeocoderProps> = ({
                 Singapore OneMap &amp; SLA Spatial Geocoder
               </h2>
 
-              {/* OneMap Token Status Pill */}
-              <button
-                onClick={() => {
-                  setAuthError(null);
-                  setAuthSuccess(null);
-                  setShowAuthModal(true);
-                }}
-                className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold border transition cursor-pointer ${
+              {/* OneMap SLA Status Badge */}
+              <div
+                className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold border transition ${
                   tokenInfo.isValid
                     ? isDark
-                      ? 'bg-emerald-500/10 text-emerald-300 border-emerald-500/30 hover:bg-emerald-500/20'
-                      : 'bg-emerald-50 text-emerald-700 border-emerald-200 hover:bg-emerald-100'
+                      ? 'bg-emerald-500/10 text-emerald-300 border-emerald-500/30'
+                      : 'bg-emerald-50 text-emerald-700 border-emerald-200'
                     : isDark
-                    ? 'bg-amber-500/10 text-amber-300 border-amber-500/30 hover:bg-amber-500/20'
-                    : 'bg-amber-50 text-amber-700 border-amber-200 hover:bg-amber-100'
+                    ? 'bg-slate-800 text-slate-300 border-slate-700'
+                    : 'bg-slate-100 text-slate-700 border-slate-200'
                 }`}
-                title="Manage Singapore OneMap SLA API Token"
+                title={tokenInfo.isValid ? 'Singapore SLA OneMap Spatial Engine Active' : 'SLA Basemap Active'}
               >
-                <Key className="w-3 h-3 text-amber-400" />
-                <span>
-                  {tokenInfo.isValid 
-                    ? `OneMap Token: Active (${tokenInfo.hoursRemaining}h left)` 
-                    : 'OneMap API: 3-Day Token'}
-                </span>
-              </button>
+                <span className={`w-2 h-2 rounded-full ${tokenInfo.isValid ? 'bg-emerald-500 animate-pulse' : 'bg-slate-400'}`} />
+                <span>OneMap SLA</span>
+              </div>
             </div>
             <p className={`text-xs mt-0.5 ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>
               Search any Singapore postal code, block, or street. Click anywhere on the map to reverse-geocode SLA addresses.
@@ -956,267 +872,6 @@ export const Tab05MapGeocoder: React.FC<Tab05MapGeocoderProps> = ({
           </div>
         )}
       </div>
-
-      {/* OneMap Token Authentication / Minting Modal */}
-      {showAuthModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-xs animate-in fade-in duration-150">
-          <div className={`max-w-lg w-full rounded-2xl p-6 border shadow-2xl space-y-4 ${
-            isDark ? 'bg-slate-900 border-slate-700 text-slate-100' : 'bg-white border-slate-200 text-slate-800'
-          }`}>
-            <div className="flex items-start justify-between">
-              <div className="flex items-center gap-2.5">
-                <div className="w-9 h-9 rounded-xl bg-amber-500/20 text-amber-400 flex items-center justify-center">
-                  <Key className="w-5 h-5" />
-                </div>
-                <div>
-                  <h3 className={`text-base font-bold ${isDark ? 'text-white' : 'text-slate-900'}`}>
-                    OneMap API 3-Day Token Manager
-                  </h3>
-                  <p className="text-[11px] text-slate-400">
-                    Singapore Land Authority (SLA) Official API Integration
-                  </p>
-                </div>
-              </div>
-              <button
-                onClick={() => setShowAuthModal(false)}
-                className={`p-1.5 rounded-lg cursor-pointer ${isDark ? 'text-slate-400 hover:text-white bg-slate-800' : 'text-slate-500 hover:text-slate-900 bg-slate-100'}`}
-              >
-                ✕
-              </button>
-            </div>
-
-            {/* Modal Tabs */}
-            <div className={`flex border-b text-xs ${isDark ? 'border-slate-800' : 'border-slate-200'}`}>
-              <button
-                onClick={() => setAuthTab('mint')}
-                className={`pb-2 px-3 font-semibold border-b-2 transition cursor-pointer ${
-                  authTab === 'mint'
-                    ? 'border-rose-500 text-rose-500'
-                    : 'border-transparent text-slate-400 hover:text-slate-200'
-                }`}
-              >
-                Mint 3-Day Token
-              </button>
-              <button
-                onClick={() => setAuthTab('paste')}
-                className={`pb-2 px-3 font-semibold border-b-2 transition cursor-pointer ${
-                  authTab === 'paste'
-                    ? 'border-rose-500 text-rose-500'
-                    : 'border-transparent text-slate-400 hover:text-slate-200'
-                }`}
-              >
-                Paste SLA Token
-              </button>
-              <button
-                onClick={() => setAuthTab('endpoints')}
-                className={`pb-2 px-3 font-semibold border-b-2 transition cursor-pointer ${
-                  authTab === 'endpoints'
-                    ? 'border-rose-500 text-rose-500'
-                    : 'border-transparent text-slate-400 hover:text-slate-200'
-                }`}
-              >
-                SLA Endpoints
-              </button>
-            </div>
-
-            {/* Current Status Banner */}
-            {tokenInfo.isValid ? (
-              <div className="p-3 rounded-xl bg-emerald-500/10 border border-emerald-500/30 text-xs text-emerald-400 flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                  <CheckCircle2 className="w-4 h-4 shrink-0 text-emerald-400" />
-                  <div>
-                    <span className="font-bold">Active SLA Token: </span>
-                    Valid for ~{tokenInfo.hoursRemaining} more hours.
-                    {tokenInfo.email && <span className="opacity-80 block text-[11px]">Account: {tokenInfo.email}</span>}
-                  </div>
-                </div>
-                <button
-                  type="button"
-                  onClick={handleClearToken}
-                  className="px-2 py-1 rounded-lg bg-rose-500/20 text-rose-400 hover:bg-rose-500/30 text-[10px] font-semibold flex items-center gap-1 cursor-pointer"
-                >
-                  <Trash2 className="w-3 h-3" />
-                  <span>Disconnect</span>
-                </button>
-              </div>
-            ) : (
-              <div className="p-3 rounded-xl bg-amber-500/10 border border-amber-500/30 text-xs text-amber-400 flex items-center gap-2">
-                <Info className="w-4 h-4 shrink-0" />
-                <div>
-                  No active token found. Mint or paste a 3-day token for official SLA geocoding, reverse geocoding, and multi-modal routing.
-                </div>
-              </div>
-            )}
-
-            {authSuccess && (
-              <div className="p-3 rounded-xl bg-emerald-500/10 border border-emerald-500/30 text-xs text-emerald-400 flex items-center gap-2">
-                <CheckCircle2 className="w-4 h-4 shrink-0" />
-                <span>{authSuccess}</span>
-              </div>
-            )}
-
-            {authError && (
-              <div className="p-3 rounded-xl bg-rose-500/10 border border-rose-500/30 text-xs text-rose-400 flex items-center gap-2">
-                <AlertCircle className="w-4 h-4 shrink-0" />
-                <span>{authError}</span>
-              </div>
-            )}
-
-            {/* TAB 1: MINT WITH CREDENTIALS */}
-            {authTab === 'mint' && (
-              <form onSubmit={handleMintToken} className="space-y-3 pt-1">
-                <div>
-                  <label className="block text-xs font-semibold mb-1">
-                    OneMap Account Email
-                  </label>
-                  <div className="relative">
-                    <input
-                      type="email"
-                      required
-                      value={authEmail}
-                      onChange={e => setAuthEmail(e.target.value)}
-                      placeholder="xk3lvin@gmail.com"
-                      className={`w-full text-xs rounded-xl pl-9 pr-3 py-2 border focus:ring-2 focus:ring-rose-500 ${
-                        isDark 
-                          ? 'bg-slate-950 border-slate-700 text-white' 
-                          : 'bg-slate-50 border-slate-300 text-slate-900'
-                      }`}
-                    />
-                    <Mail className="w-4 h-4 text-slate-400 absolute left-3 top-2.5" />
-                  </div>
-                </div>
-
-                <div>
-                  <label className="block text-xs font-semibold mb-1">
-                    OneMap Account Password
-                  </label>
-                  <div className="relative">
-                    <input
-                      type="password"
-                      required
-                      value={authPassword}
-                      onChange={e => setAuthPassword(e.target.value)}
-                      placeholder="••••••••••••"
-                      className={`w-full text-xs rounded-xl pl-9 pr-3 py-2 border focus:ring-2 focus:ring-rose-500 ${
-                        isDark 
-                          ? 'bg-slate-950 border-slate-700 text-white' 
-                          : 'bg-slate-50 border-slate-300 text-slate-900'
-                      }`}
-                    />
-                    <Lock className="w-4 h-4 text-slate-400 absolute left-3 top-2.5" />
-                  </div>
-                  <p className="text-[10px] text-slate-400 mt-1">
-                    Directly authenticates via SLA OneMap with 3-day validity. Protected against HTML response errors.
-                  </p>
-                </div>
-
-                <div className="flex gap-2 pt-2">
-                  <button
-                    type="submit"
-                    disabled={isMintingToken}
-                    className="flex-1 py-2.5 rounded-xl bg-rose-600 hover:bg-rose-500 active:scale-95 text-white text-xs font-bold transition flex items-center justify-center gap-1.5 shadow-md disabled:opacity-50 cursor-pointer"
-                  >
-                    {isMintingToken ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Key className="w-4 h-4" />}
-                    <span>{isMintingToken ? 'Minting 3-Day Token...' : 'Mint OneMap Token'}</span>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setShowAuthModal(false)}
-                    className={`px-4 py-2.5 rounded-xl border text-xs font-semibold cursor-pointer ${
-                      isDark 
-                        ? 'bg-slate-800 hover:bg-slate-700 text-slate-300 border-slate-700' 
-                        : 'bg-slate-100 hover:bg-slate-200 text-slate-700 border-slate-300'
-                    }`}
-                  >
-                    Close
-                  </button>
-                </div>
-              </form>
-            )}
-
-            {/* TAB 2: PASTE DIRECT TOKEN */}
-            {authTab === 'paste' && (
-              <form onSubmit={handleSavePastedToken} className="space-y-3 pt-1">
-                <div>
-                  <label className="block text-xs font-semibold mb-1">
-                    Existing OneMap API Token
-                  </label>
-                  <textarea
-                    rows={3}
-                    required
-                    value={pastedToken}
-                    onChange={e => setPastedToken(e.target.value)}
-                    placeholder="Paste your active SLA OneMap token string here..."
-                    className={`w-full text-xs font-mono rounded-xl p-3 border focus:ring-2 focus:ring-rose-500 ${
-                      isDark 
-                        ? 'bg-slate-950 border-slate-700 text-white' 
-                        : 'bg-slate-50 border-slate-300 text-slate-900'
-                    }`}
-                  />
-                  <p className="text-[10px] text-slate-400 mt-1">
-                    If you already generated a token from the OneMap Developer Portal, paste it here to activate all SLA services immediately.
-                  </p>
-                </div>
-
-                <div className="flex gap-2 pt-2">
-                  <button
-                    type="submit"
-                    className="flex-1 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 active:scale-95 text-white text-xs font-bold transition flex items-center justify-center gap-1.5 shadow-md cursor-pointer"
-                  >
-                    <CheckCircle2 className="w-4 h-4" />
-                    <span>Save &amp; Activate Token</span>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setShowAuthModal(false)}
-                    className={`px-4 py-2.5 rounded-xl border text-xs font-semibold cursor-pointer ${
-                      isDark 
-                        ? 'bg-slate-800 hover:bg-slate-700 text-slate-300 border-slate-700' 
-                        : 'bg-slate-100 hover:bg-slate-200 text-slate-700 border-slate-300'
-                    }`}
-                  >
-                    Close
-                  </button>
-                </div>
-              </form>
-            )}
-
-            {/* TAB 3: ENDPOINTS REFERENCE */}
-            {authTab === 'endpoints' && (
-              <div className="space-y-2.5 text-xs">
-                <div className={`p-2.5 rounded-xl border font-mono text-[11px] space-y-1 ${
-                  isDark ? 'bg-slate-950 border-slate-800 text-slate-300' : 'bg-slate-50 border-slate-200 text-slate-700'
-                }`}>
-                  <div className="font-bold text-rose-500 font-sans">1. Mint a Token (POST, lasts 3 days):</div>
-                  <div className="text-amber-400 break-all">https://www.onemap.gov.sg/api/auth/post/getToken</div>
-                  <div className="text-[10px] text-slate-400">Body: {`{"email":"...","password":"..."}`}</div>
-                </div>
-
-                <div className={`p-2.5 rounded-xl border font-mono text-[11px] space-y-1 ${
-                  isDark ? 'bg-slate-950 border-slate-800 text-slate-300' : 'bg-slate-50 border-slate-200 text-slate-700'
-                }`}>
-                  <div className="font-bold text-rose-500 font-sans">2. Geocode / Search (Auth header required):</div>
-                  <div className="text-amber-400 break-all">https://www.onemap.gov.sg/api/common/elastic/search?searchVal=...</div>
-                </div>
-
-                <div className={`p-2.5 rounded-xl border font-mono text-[11px] space-y-1 ${
-                  isDark ? 'bg-slate-950 border-slate-800 text-slate-300' : 'bg-slate-50 border-slate-200 text-slate-700'
-                }`}>
-                  <div className="font-bold text-rose-500 font-sans">3. Reverse Geocode (Token required):</div>
-                  <div className="text-amber-400 break-all">https://www.onemap.gov.sg/api/public/revgeocode?location=lat,lng&amp;buffer=40</div>
-                </div>
-
-                <div className={`p-2.5 rounded-xl border font-mono text-[11px] space-y-1 ${
-                  isDark ? 'bg-slate-950 border-slate-800 text-slate-300' : 'bg-slate-50 border-slate-200 text-slate-700'
-                }`}>
-                  <div className="font-bold text-rose-500 font-sans">4. Routing Service (walk | drive | cycle | pt):</div>
-                  <div className="text-amber-400 break-all">https://www.onemap.gov.sg/api/public/routingsvc/route?start=...&amp;end=...&amp;routeType=walk</div>
-                </div>
-              </div>
-            )}
-          </div>
-        </div>
-      )}
     </div>
   );
 };

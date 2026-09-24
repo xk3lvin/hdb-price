@@ -17,11 +17,13 @@ interface OneMapTokenCache {
 
 let oneMapToken: OneMapTokenCache | null = null;
 
-// Initialize from process.env if ONEMAP_API_TOKEN is supplied
-if (process.env.ONEMAP_API_TOKEN) {
+// Initialize from process.env if VITE_ONEMAP_TOKEN, ONEMAP_API_TOKEN, or ONEMAP_TOKEN is supplied
+const envToken = (process.env.VITE_ONEMAP_TOKEN || process.env.ONEMAP_API_TOKEN || process.env.ONEMAP_TOKEN)?.trim();
+if (envToken) {
   oneMapToken = {
-    accessToken: process.env.ONEMAP_API_TOKEN,
-    expiryTimestamp: Date.now() + 3 * 24 * 60 * 60 * 1000,
+    accessToken: envToken,
+    expiryTimestamp: Date.now() + 365 * 24 * 60 * 60 * 1000,
+    email: 'Environment Variable (Pre-configured)',
   };
 }
 
@@ -183,7 +185,17 @@ async function startServer() {
     }
   });
 
-  // 4. Set OneMap token directly (paste token)
+  // 4. Get active OneMap token (from environment variable or server cache)
+  app.get('/api/onemap/token', (req, res) => {
+    const token = oneMapToken?.accessToken || (process.env.VITE_ONEMAP_TOKEN || process.env.ONEMAP_API_TOKEN || process.env.ONEMAP_TOKEN)?.trim() || null;
+    res.json({
+      success: Boolean(token),
+      token: token || null,
+      hasToken: Boolean(token),
+    });
+  });
+
+  // 5. Set OneMap token directly (paste token)
   app.post('/api/onemap/set-token', (req, res) => {
     const { token, expiryTimestamp, email } = req.body || {};
     if (!token || typeof token !== 'string') {

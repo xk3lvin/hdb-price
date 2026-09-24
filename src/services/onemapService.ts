@@ -19,6 +19,50 @@ export interface OneMapTokenInfo {
   expiryTimestamp: number | null;
   isValid: boolean;
   hoursRemaining: number;
+  isEnvConfigured?: boolean;
+}
+
+let cachedServerToken: string | null = null;
+let serverTokenPromise: Promise<string | null> | null = null;
+
+/**
+ * Initialize OneMap token from environment variable or backend proxy
+ */
+export async function initOneMapToken(): Promise<string | null> {
+  // Check client env variable first
+  const envToken = 
+    ((import.meta as any).env?.VITE_ONEMAP_TOKEN as string | undefined)?.trim() ||
+    ((import.meta as any).env?.VITE_ONEMAP_API_TOKEN as string | undefined)?.trim();
+
+  if (envToken) {
+    return envToken;
+  }
+
+  if (cachedServerToken) return cachedServerToken;
+  if (serverTokenPromise) return serverTokenPromise;
+
+  serverTokenPromise = (async () => {
+    try {
+      const res = await safeFetchJson<{ success?: boolean; token?: string }>('/api/onemap/token', {
+        signal: AbortSignal.timeout(3000),
+      });
+      if (res.ok && res.data?.token) {
+        cachedServerToken = res.data.token.trim();
+        window.dispatchEvent(new Event('onemap_token_updated'));
+        return cachedServerToken;
+      }
+    } catch {
+      // ignore
+    }
+    return null;
+  })();
+
+  return serverTokenPromise;
+}
+
+// Kick off token initialization immediately in background
+if (typeof window !== 'undefined') {
+  initOneMapToken().catch(() => {});
 }
 
 export interface OneMapSearchResult {
@@ -110,16 +154,45 @@ async function safeFetchJson<T = any>(
 }
 
 /**
- * Get active token from localStorage
+ * Get active token from environment variable, server cache, or localStorage
  */
 export function getStoredOneMapToken(): OneMapTokenInfo {
+  // 1. Check client environment variable (VITE_ONEMAP_TOKEN or VITE_ONEMAP_API_TOKEN)
+  const envToken = 
+    ((import.meta as any).env?.VITE_ONEMAP_TOKEN as string | undefined)?.trim() ||
+    ((import.meta as any).env?.VITE_ONEMAP_API_TOKEN as string | undefined)?.trim();
+
+  if (envToken) {
+    return {
+      token: envToken,
+      email: 'Environment Variable (Pre-configured)',
+      expiryTimestamp: Date.now() + 365 * 24 * 60 * 60 * 1000,
+      isValid: true,
+      hoursRemaining: 8760,
+      isEnvConfigured: true,
+    };
+  }
+
+  // 2. Check cached token from server environment
+  if (cachedServerToken) {
+    return {
+      token: cachedServerToken,
+      email: 'Server Environment (Pre-configured)',
+      expiryTimestamp: Date.now() + 365 * 24 * 60 * 60 * 1000,
+      isValid: true,
+      hoursRemaining: 8760,
+      isEnvConfigured: true,
+    };
+  }
+
+  // 3. Check localStorage fallback
   try {
     const token = localStorage.getItem(STORAGE_KEY_TOKEN);
     const expiryStr = localStorage.getItem(STORAGE_KEY_EXPIRY);
     const email = localStorage.getItem(STORAGE_KEY_EMAIL) || undefined;
 
     if (!token) {
-      return { token: null, email, expiryTimestamp: null, isValid: false, hoursRemaining: 0 };
+      return { token: null, email, expiryTimestamp: null, isValid: false, hoursRemaining: 0, isEnvConfigured: false };
     }
 
     const expiry = expiryStr ? Number(expiryStr) : 0;
@@ -133,9 +206,10 @@ export function getStoredOneMapToken(): OneMapTokenInfo {
       expiryTimestamp: expiry,
       isValid,
       hoursRemaining,
+      isEnvConfigured: false,
     };
   } catch {
-    return { token: null, expiryTimestamp: null, isValid: false, hoursRemaining: 0 };
+    return { token: null, expiryTimestamp: null, isValid: false, hoursRemaining: 0, isEnvConfigured: false };
   }
 }
 
@@ -297,7 +371,7 @@ export async function searchOneMap(
 /**
  * Reverse Geocode: convert Lat/Lng to Singapore Postal & Address
  * Endpoint: https://www.onemap.gov.sg/api/public/revgeocode?location=lat,lng&buffer=40&addressType=All
- * Requires Token.
+ * Uses environment variable / direct token with transparent server proxy fallback.
  */
 export async function reverseGeocodeOneMap(
   lat: number,
@@ -305,45 +379,74 @@ export async function reverseGeocodeOneMap(
   buffer: number = 40
 ): Promise<{ address?: string; building?: string; postal?: string; error?: string }> {
   const tokenInfo = getStoredOneMapToken();
-  if (!tokenInfo.token || !tokenInfo.isValid) {
-    return { error: 'OneMap API Token required for reverse geocoding.' };
+
+  // Try direct OneMap endpoint if token is present
+  if (tokenInfo.token && tokenInfo.isValid) {
+    const url = `https://www.onemap.gov.sg/api/public/revgeocode?location=${lat},${lng}&buffer=${buffer}&addressType=All`;
+    const res = await safeFetchJson<{
+      GeocodeInfo?: Array<{
+        BUILDINGNAME?: string;
+        BLOCK?: string;
+        ROAD?: string;
+        POSTALCODE?: string;
+      }>;
+      error?: string;
+    }>(url, {
+      headers: {
+        Authorization: tokenInfo.token,
+      },
+      signal: AbortSignal.timeout(5000),
+    });
+
+    if (res.ok && res.data?.GeocodeInfo && res.data.GeocodeInfo.length > 0) {
+      const info = res.data.GeocodeInfo[0];
+      const road = info.ROAD || '';
+      const blk = info.BLOCK ? `Blk ${info.BLOCK} ` : '';
+      const postal = info.POSTALCODE || '';
+      return {
+        address: `${blk}${road}`.trim() || 'Singapore Location',
+        building: info.BUILDINGNAME || '',
+        postal,
+      };
+    }
   }
 
-  const url = `https://www.onemap.gov.sg/api/public/revgeocode?location=${lat},${lng}&buffer=${buffer}&addressType=All`;
-  const res = await safeFetchJson<{
-    GeocodeInfo?: Array<{
-      BUILDINGNAME?: string;
-      BLOCK?: string;
-      ROAD?: string;
-      POSTALCODE?: string;
-    }>;
-    error?: string;
-  }>(url, {
-    headers: {
-      Authorization: tokenInfo.token,
-    },
-    signal: AbortSignal.timeout(5000),
-  });
+  // Fallback: Use backend server proxy (which uses server environment variable ONEMAP_API_TOKEN / VITE_ONEMAP_TOKEN)
+  try {
+    const proxyRes = await safeFetchJson<{
+      GeocodeInfo?: Array<{
+        BUILDINGNAME?: string;
+        BLOCK?: string;
+        ROAD?: string;
+        POSTALCODE?: string;
+      }>;
+      error?: string;
+    }>(`/api/onemap/revgeocode?location=${lat},${lng}&buffer=${buffer}&addressType=All`, {
+      signal: AbortSignal.timeout(5000),
+    });
 
-  if (res.ok && res.data?.GeocodeInfo && res.data.GeocodeInfo.length > 0) {
-    const info = res.data.GeocodeInfo[0];
-    const road = info.ROAD || '';
-    const blk = info.BLOCK ? `Blk ${info.BLOCK} ` : '';
-    const postal = info.POSTALCODE || '';
-    return {
-      address: `${blk}${road}`.trim() || 'Singapore Location',
-      building: info.BUILDINGNAME || '',
-      postal,
-    };
+    if (proxyRes.ok && proxyRes.data?.GeocodeInfo && proxyRes.data.GeocodeInfo.length > 0) {
+      const info = proxyRes.data.GeocodeInfo[0];
+      const road = info.ROAD || '';
+      const blk = info.BLOCK ? `Blk ${info.BLOCK} ` : '';
+      const postal = info.POSTALCODE || '';
+      return {
+        address: `${blk}${road}`.trim() || 'Singapore Location',
+        building: info.BUILDINGNAME || '',
+        postal,
+      };
+    }
+  } catch {
+    // ignore
   }
 
-  return { error: res.error || 'No address found at this coordinate.' };
+  return { error: 'No address found at this coordinate.' };
 }
 
 /**
  * Route calculation: walk | drive | cycle | pt
  * Endpoint: https://www.onemap.gov.sg/api/public/routingsvc/route?start=...&end=...&routeType=...
- * Requires Token.
+ * Uses environment variable / direct token with transparent server proxy fallback.
  */
 export async function getOneMapRoute(
   startLat: number,
@@ -353,24 +456,38 @@ export async function getOneMapRoute(
   routeType: 'walk' | 'drive' | 'cycle' | 'pt' = 'walk'
 ): Promise<OneMapRouteResult> {
   const tokenInfo = getStoredOneMapToken();
-  if (!tokenInfo.token || !tokenInfo.isValid) {
-    return { error: 'OneMap API Token required for routing calculation.' };
+
+  // Try direct OneMap endpoint if token is present
+  if (tokenInfo.token && tokenInfo.isValid) {
+    const start = `${startLat},${startLng}`;
+    const end = `${endLat},${endLng}`;
+    const url = `https://www.onemap.gov.sg/api/public/routingsvc/route?start=${start}&end=${end}&routeType=${routeType}`;
+
+    const res = await safeFetchJson<OneMapRouteResult>(url, {
+      headers: {
+        Authorization: tokenInfo.token,
+      },
+      signal: AbortSignal.timeout(8000),
+    });
+
+    if (res.ok && res.data && res.data.route_summary) {
+      return res.data;
+    }
   }
 
-  const start = `${startLat},${startLng}`;
-  const end = `${endLat},${endLng}`;
-  const url = `https://www.onemap.gov.sg/api/public/routingsvc/route?start=${start}&end=${end}&routeType=${routeType}`;
+  // Fallback: Use backend server proxy (which uses server environment variable ONEMAP_API_TOKEN / VITE_ONEMAP_TOKEN)
+  try {
+    const proxyRes = await safeFetchJson<OneMapRouteResult>(
+      `/api/onemap/route?start=${startLat},${startLng}&end=${endLat},${endLng}&routeType=${routeType}`,
+      { signal: AbortSignal.timeout(8000) }
+    );
 
-  const res = await safeFetchJson<OneMapRouteResult>(url, {
-    headers: {
-      Authorization: tokenInfo.token,
-    },
-    signal: AbortSignal.timeout(8000),
-  });
-
-  if (res.ok && res.data) {
-    return res.data;
+    if (proxyRes.ok && proxyRes.data) {
+      return proxyRes.data;
+    }
+  } catch {
+    // ignore
   }
 
-  return { error: res.error || 'Unable to compute route.' };
+  return { error: 'Unable to compute route.' };
 }
