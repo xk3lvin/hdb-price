@@ -38,12 +38,20 @@ async function mintOneMapToken(email: string, pass: string): Promise<OneMapToken
     body: JSON.stringify({ email, password: pass }),
   });
 
-  if (!res.ok) {
-    const errText = await res.text();
-    throw new Error(`OneMap authentication returned status ${res.status}: ${errText}`);
+  const rawText = await res.text();
+  let data: any;
+
+  try {
+    data = JSON.parse(rawText);
+  } catch {
+    const preview = rawText.slice(0, 100).replace(/\s+/g, ' ');
+    throw new Error(`OneMap authentication returned status ${res.status}: ${preview}`);
   }
 
-  const data = await res.json();
+  if (!res.ok) {
+    throw new Error(data.error || data.message || `OneMap authentication returned status ${res.status}`);
+  }
+
   if (!data.access_token) {
     throw new Error('No access_token found in OneMap authentication response');
   }
@@ -175,7 +183,29 @@ async function startServer() {
     }
   });
 
-  // 4. OneMap search proxy
+  // 4. Set OneMap token directly (paste token)
+  app.post('/api/onemap/set-token', (req, res) => {
+    const { token, expiryTimestamp, email } = req.body || {};
+    if (!token || typeof token !== 'string') {
+      return res.status(400).json({ success: false, error: 'Token is required' });
+    }
+
+    const expiryMs = Number(expiryTimestamp) || Date.now() + 3 * 24 * 60 * 60 * 1000;
+    oneMapToken = {
+      accessToken: token.trim(),
+      expiryTimestamp: expiryMs,
+      email: email?.trim(),
+    };
+
+    const hoursRemaining = Math.max(0, Math.round((expiryMs - Date.now()) / (1000 * 60 * 60)));
+    res.json({
+      success: true,
+      message: 'Token configured successfully',
+      hoursRemaining,
+    });
+  });
+
+  // 5. OneMap search proxy
   app.get('/api/onemap/search', async (req, res) => {
     const searchVal = req.query.searchVal as string;
     if (!searchVal) return res.json({ results: [] });
@@ -183,18 +213,75 @@ async function startServer() {
     try {
       const headers: Record<string, string> = {};
       if (oneMapToken?.accessToken) {
-        headers['Authorization'] = `Bearer ${oneMapToken.accessToken}`;
+        headers['Authorization'] = oneMapToken.accessToken;
       }
       const query = encodeURIComponent(searchVal);
       const omRes = await fetch(
         `https://www.onemap.gov.sg/api/common/elastic/search?searchVal=${query}&returnGeom=Y&getAddrDetails=Y&pageNum=1`,
         { headers }
       );
-      if (omRes.ok) {
-        const data = await omRes.json();
+      const rawText = await omRes.text();
+      try {
+        const data = JSON.parse(rawText);
         return res.json(data);
+      } catch {
+        return res.status(omRes.status).json({ error: 'Invalid response from OneMap search' });
       }
-      res.status(omRes.status).json({ error: 'OneMap search request failed' });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // 6. Reverse geocode proxy
+  app.get('/api/onemap/revgeocode', async (req, res) => {
+    const { location, buffer, addressType } = req.query;
+    if (!location) return res.status(400).json({ error: 'Location required' });
+
+    try {
+      const headers: Record<string, string> = {};
+      if (oneMapToken?.accessToken) {
+        headers['Authorization'] = oneMapToken.accessToken;
+      }
+      const buff = buffer || 40;
+      const addrType = addressType || 'All';
+      const omRes = await fetch(
+        `https://www.onemap.gov.sg/api/public/revgeocode?location=${location}&buffer=${buff}&addressType=${addrType}`,
+        { headers }
+      );
+      const rawText = await omRes.text();
+      try {
+        const data = JSON.parse(rawText);
+        return res.json(data);
+      } catch {
+        return res.status(omRes.status).json({ error: 'Invalid response from OneMap revgeocode' });
+      }
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // 7. Route calculation proxy
+  app.get('/api/onemap/route', async (req, res) => {
+    const { start, end, routeType } = req.query;
+    if (!start || !end) return res.status(400).json({ error: 'Start and end required' });
+
+    try {
+      const headers: Record<string, string> = {};
+      if (oneMapToken?.accessToken) {
+        headers['Authorization'] = oneMapToken.accessToken;
+      }
+      const rType = routeType || 'walk';
+      const omRes = await fetch(
+        `https://www.onemap.gov.sg/api/public/routingsvc/route?start=${start}&end=${end}&routeType=${rType}`,
+        { headers }
+      );
+      const rawText = await omRes.text();
+      try {
+        const data = JSON.parse(rawText);
+        return res.json(data);
+      } catch {
+        return res.status(omRes.status).json({ error: 'Invalid response from OneMap route service' });
+      }
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }

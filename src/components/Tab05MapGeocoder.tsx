@@ -8,22 +8,36 @@ import {
   SG_TOWN_COORDINATES, 
   GeocodedLocation 
 } from '../services/geocoder';
+import {
+  getStoredOneMapToken,
+  saveOneMapToken,
+  clearOneMapToken,
+  mintOneMap3DayToken,
+  reverseGeocodeOneMap,
+  getOneMapRoute,
+  OneMapTokenInfo,
+  OneMapRouteResult
+} from '../services/onemapService';
 import { 
   Search, 
   MapPin, 
   Navigation, 
   Layers, 
-  Sparkles, 
   RefreshCw, 
   Key,
-  ShieldCheck,
   CheckCircle2,
   AlertCircle,
   ExternalLink,
   Lock,
   Mail,
-  ChevronRight,
-  Info
+  Info,
+  Route,
+  Footprints,
+  Car,
+  Clock,
+  Compass,
+  Building2,
+  Trash2
 } from 'lucide-react';
 
 interface Tab05MapGeocoderProps {
@@ -49,6 +63,38 @@ interface PlottedBlock {
 
 type BasemapStyle = 'onemap-night' | 'onemap-default' | 'onemap-grey' | 'onemap-original' | 'carto-dark' | 'carto-light';
 
+/**
+ * Standard Polyline decoder for routing coordinates
+ */
+function decodePolyline(str: string, precision = 5): [number, number][] {
+  let index = 0, lat = 0, lng = 0;
+  const coordinates: [number, number][] = [];
+  const factor = Math.pow(10, precision);
+
+  while (index < str.length) {
+    let byte = null, shift = 0, result = 0;
+    do {
+      byte = str.charCodeAt(index++) - 63;
+      result |= (byte & 0x1f) << shift;
+      shift += 5;
+    } while (byte >= 0x20);
+    const latitude_change = (result & 1) ? ~(result >> 1) : (result >> 1);
+
+    shift = result = 0;
+    do {
+      byte = str.charCodeAt(index++) - 63;
+      result |= (byte & 0x1f) << shift;
+      shift += 5;
+    } while (byte >= 0x20);
+    const longitude_change = (result & 1) ? ~(result >> 1) : (result >> 1);
+
+    lat += latitude_change;
+    lng += longitude_change;
+    coordinates.push([lat / factor, lng / factor]);
+  }
+  return coordinates;
+}
+
 export const Tab05MapGeocoder: React.FC<Tab05MapGeocoderProps> = ({
   records,
   selectedTown,
@@ -62,6 +108,7 @@ export const Tab05MapGeocoder: React.FC<Tab05MapGeocoderProps> = ({
   const tileLayerRef = useRef<L.TileLayer | null>(null);
   const markersLayerRef = useRef<L.LayerGroup | null>(null);
   const searchPinLayerRef = useRef<L.LayerGroup | null>(null);
+  const routeLayerRef = useRef<L.Polyline | null>(null);
 
   const [searchQuery, setSearchQuery] = useState('');
   const [isSearching, setIsSearching] = useState(false);
@@ -75,16 +122,48 @@ export const Tab05MapGeocoder: React.FC<Tab05MapGeocoderProps> = ({
 
   // OneMap Token Authentication Modal & Status
   const [showAuthModal, setShowAuthModal] = useState(false);
+  const [authTab, setAuthTab] = useState<'mint' | 'paste' | 'endpoints'>('mint');
   const [authEmail, setAuthEmail] = useState('xk3lvin@gmail.com');
   const [authPassword, setAuthPassword] = useState('');
+  const [pastedToken, setPastedToken] = useState('');
   const [isMintingToken, setIsMintingToken] = useState(false);
   const [authError, setAuthError] = useState<string | null>(null);
   const [authSuccess, setAuthSuccess] = useState<string | null>(null);
-  const [oneMapStatus, setOneMapStatus] = useState<{
-    connected: boolean;
-    hoursRemaining?: number;
-    email?: string;
-  }>({ connected: false });
+  const [tokenInfo, setTokenInfo] = useState<OneMapTokenInfo>(getStoredOneMapToken());
+
+  // Click-to-reverse-geocode state
+  const [clickedLocation, setClickedLocation] = useState<{
+    lat: number;
+    lng: number;
+    address?: string;
+    building?: string;
+    postal?: string;
+    isLoading: boolean;
+  } | null>(null);
+
+  // Routing State
+  const [routeInfo, setRouteInfo] = useState<{
+    distanceKm: number;
+    durationMins: number;
+    routeType: 'walk' | 'drive' | 'pt';
+    destinationName: string;
+    isLoading: boolean;
+    error?: string;
+  } | null>(null);
+
+  // Sync token info from storage
+  const syncTokenState = () => {
+    const info = getStoredOneMapToken();
+    setTokenInfo(info);
+    if (info.email) setAuthEmail(info.email);
+  };
+
+  useEffect(() => {
+    syncTokenState();
+    const handleUpdate = () => syncTokenState();
+    window.addEventListener('onemap_token_updated', handleUpdate);
+    return () => window.removeEventListener('onemap_token_updated', handleUpdate);
+  }, []);
 
   // Sync default basemap when theme changes unless user explicitly picked a style
   useEffect(() => {
@@ -93,24 +172,7 @@ export const Tab05MapGeocoder: React.FC<Tab05MapGeocoderProps> = ({
     }
   }, [isDark, userOverrodeBasemap]);
 
-  // Fetch OneMap API Token status from backend proxy
-  const checkOneMapStatus = async () => {
-    try {
-      const res = await fetch('/api/onemap/status');
-      if (res.ok) {
-        const data = await res.json();
-        setOneMapStatus(data);
-      }
-    } catch {
-      // Backend status unavailable, fallback quietly
-    }
-  };
-
-  useEffect(() => {
-    checkOneMapStatus();
-  }, []);
-
-  // Handle Token Minting via POST /api/onemap/mint-token
+  // Handle Token Minting
   const handleMintToken = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!authEmail.trim() || !authPassword.trim()) {
@@ -123,29 +185,45 @@ export const Tab05MapGeocoder: React.FC<Tab05MapGeocoderProps> = ({
     setAuthSuccess(null);
 
     try {
-      const res = await fetch('/api/onemap/mint-token', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email: authEmail.trim(), password: authPassword.trim() }),
-      });
-
-      const data = await res.json();
-      if (res.ok && data.success) {
-        setAuthSuccess(`Success! OneMap 3-day token minted. Valid for ~${data.hoursRemaining || 72} hours.`);
+      const result = await mintOneMap3DayToken(authEmail.trim(), authPassword.trim());
+      if (result.success) {
+        setAuthSuccess(`Success! OneMap 3-Day Token minted (~${result.hoursRemaining ?? 72} hours validity).`);
         setAuthPassword('');
-        checkOneMapStatus();
-        // Refresh tiles
+        syncTokenState();
         if (tileLayerRef.current) {
           tileLayerRef.current.redraw();
         }
       } else {
-        setAuthError(data.error || 'Failed to authenticate with OneMap. Please verify your credentials.');
+        setAuthError(result.error || 'Failed to authenticate with OneMap.');
       }
     } catch (err: any) {
-      setAuthError(err.message || 'Connection error while contacting server.');
+      setAuthError(err.message || 'Connection error.');
     } finally {
       setIsMintingToken(false);
     }
+  };
+
+  // Handle Pasting Direct Token
+  const handleSavePastedToken = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!pastedToken.trim()) {
+      setAuthError('Please paste a valid OneMap token string.');
+      return;
+    }
+    setAuthError(null);
+    // 3 days duration by default
+    const expiry = Date.now() + 3 * 24 * 60 * 60 * 1000;
+    saveOneMapToken(pastedToken.trim(), expiry, authEmail.trim() || undefined);
+    setPastedToken('');
+    setAuthSuccess('OneMap token saved successfully! Valid for 3 days.');
+    syncTokenState();
+  };
+
+  const handleClearToken = () => {
+    clearOneMapToken();
+    setAuthSuccess(null);
+    setAuthError(null);
+    syncTokenState();
   };
 
   // Group records by block & street for clean map clustering
@@ -185,13 +263,13 @@ export const Tab05MapGeocoder: React.FC<Tab05MapGeocoderProps> = ({
   const getTileUrl = (style: BasemapStyle) => {
     switch (style) {
       case 'onemap-default':
-        return '/api/onemap/tiles/Default/{z}/{x}/{y}.png';
+        return 'https://www.onemap.gov.sg/maps/tiles/Default/{z}/{x}/{y}.png';
       case 'onemap-night':
-        return '/api/onemap/tiles/Night/{z}/{x}/{y}.png';
+        return 'https://www.onemap.gov.sg/maps/tiles/Night/{z}/{x}/{y}.png';
       case 'onemap-grey':
-        return '/api/onemap/tiles/Grey/{z}/{x}/{y}.png';
+        return 'https://www.onemap.gov.sg/maps/tiles/Grey/{z}/{x}/{y}.png';
       case 'onemap-original':
-        return '/api/onemap/tiles/Original/{z}/{x}/{y}.png';
+        return 'https://www.onemap.gov.sg/maps/tiles/Original/{z}/{x}/{y}.png';
       case 'carto-dark':
         return 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png';
       case 'carto-light':
@@ -213,7 +291,7 @@ export const Tab05MapGeocoder: React.FC<Tab05MapGeocoderProps> = ({
 
     const tileUrl = getTileUrl(selectedBasemap);
     const tileLayer = L.tileLayer(tileUrl, {
-      attribution: '&copy; <a href="https://www.onemap.gov.sg/" target="_blank">OneMap</a> &copy; Singapore Land Authority, &copy; OpenStreetMap',
+      attribution: '&copy; <a href="https://www.onemap.gov.sg/" target="_blank">OneMap</a> &copy; Singapore Land Authority',
       maxZoom: 19,
       subdomains: ['a', 'b', 'c', 'd'],
     }).addTo(map);
@@ -229,6 +307,38 @@ export const Tab05MapGeocoder: React.FC<Tab05MapGeocoderProps> = ({
     searchPinLayerRef.current = searchGroup;
     mapInstanceRef.current = map;
 
+    // Click handler on map: Trigger Reverse Geocoding
+    map.on('click', async (e: L.LeafletMouseEvent) => {
+      const { lat, lng } = e.latlng;
+      setClickedLocation({ lat, lng, isLoading: true });
+
+      // Drop temporary click pin
+      searchGroup.clearLayers();
+      const clickIcon = L.divIcon({
+        html: `
+          <div class="relative flex items-center justify-center">
+            <div class="w-4 h-4 bg-amber-500 rounded-full border-2 border-white shadow-lg animate-ping absolute"></div>
+            <div class="w-4 h-4 bg-amber-500 rounded-full border-2 border-white shadow-lg relative"></div>
+          </div>
+        `,
+        className: 'custom-click-pin',
+        iconSize: [20, 20],
+        iconAnchor: [10, 10],
+      });
+      L.marker([lat, lng], { icon: clickIcon }).addTo(searchGroup);
+
+      // Perform Reverse Geocoding via OneMap SLA
+      const rev = await reverseGeocodeOneMap(lat, lng);
+      setClickedLocation({
+        lat,
+        lng,
+        address: rev.address,
+        building: rev.building,
+        postal: rev.postal,
+        isLoading: false,
+      });
+    });
+
     return () => {
       map.remove();
       mapInstanceRef.current = null;
@@ -242,7 +352,7 @@ export const Tab05MapGeocoder: React.FC<Tab05MapGeocoderProps> = ({
     tileLayerRef.current.setUrl(newUrl);
   }, [selectedBasemap]);
 
-  // 2. Geocode & Draw Blocks on Map ("The map draws itself")
+  // 2. Geocode & Draw Blocks on Map
   useEffect(() => {
     let isCancelled = false;
 
@@ -250,7 +360,7 @@ export const Tab05MapGeocoder: React.FC<Tab05MapGeocoderProps> = ({
       if (!markersLayerRef.current || !mapInstanceRef.current) return;
       markersLayerRef.current.clearLayers();
 
-      const blocksToPlot = blockGroups.slice(0, 150);
+      const blocksToPlot = blockGroups.slice(0, 160);
       setGeocodingProgress({ current: 0, total: blocksToPlot.length, isRunning: true });
 
       const resolved: PlottedBlock[] = [];
@@ -301,6 +411,7 @@ export const Tab05MapGeocoder: React.FC<Tab05MapGeocoderProps> = ({
             const marker = L.marker(latlng, { icon: customIcon });
             marker.on('click', () => {
               setSelectedBlockData(plotted);
+              setClickedLocation(null);
             });
 
             markersLayerRef.current.addLayer(marker);
@@ -309,7 +420,7 @@ export const Tab05MapGeocoder: React.FC<Tab05MapGeocoderProps> = ({
           // ignore
         }
 
-        if (i % 5 === 0 || i === blocksToPlot.length - 1) {
+        if (i % 6 === 0 || i === blocksToPlot.length - 1) {
           setGeocodingProgress({ current: i + 1, total: blocksToPlot.length, isRunning: true });
         }
       }
@@ -350,83 +461,159 @@ export const Tab05MapGeocoder: React.FC<Tab05MapGeocoderProps> = ({
           const pulseIcon = L.divIcon({
             html: `
               <div class="relative flex items-center justify-center">
-                <span class="animate-ping absolute inline-flex h-8 w-8 rounded-full bg-rose-400 opacity-75"></span>
-                <div class="relative w-5 h-5 bg-rose-600 rounded-full border-2 border-white shadow-xl"></div>
+                <div class="w-8 h-8 bg-rose-500 rounded-full opacity-60 animate-ping absolute"></div>
+                <div class="w-6 h-6 bg-rose-600 rounded-full border-2 border-white flex items-center justify-center shadow-lg relative">
+                  <span class="text-white text-[9px] font-black">★</span>
+                </div>
               </div>
             `,
-            className: 'pulse-search-pin',
+            className: 'custom-pulse-pin',
             iconSize: [32, 32],
             iconAnchor: [16, 16],
           });
-          const m = L.marker([loc.lat, loc.lng], { icon: pulseIcon }).addTo(searchPinLayerRef.current);
-          m.bindPopup(`<b>Blk ${targetRecord.block} ${targetRecord.street_name}</b><br/>${targetRecord.town}<br/>$${targetRecord.price_num.toLocaleString()}`).openPopup();
+
+          L.marker([loc.lat, loc.lng], { icon: pulseIcon }).addTo(searchPinLayerRef.current);
+        }
+
+        const match = plottedBlocks.find(b => b.block === targetRecord.block && b.street_name === targetRecord.street_name);
+        if (match) {
+          setSelectedBlockData(match);
         }
       }
     });
-  }, [targetRecord]);
+  }, [targetRecord, plottedBlocks]);
 
-  // Geocoder Search Submission
+  // Address search form submission
   const handleAddressSearch = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!searchQuery.trim()) return;
 
     setIsSearching(true);
     try {
-      const results = await searchSingaporeAddress(searchQuery);
-      if (results.length > 0 && mapInstanceRef.current && searchPinLayerRef.current) {
+      const results = await searchSingaporeAddress(searchQuery.trim());
+      if (results.length > 0 && mapInstanceRef.current) {
         const top = results[0];
         mapInstanceRef.current.flyTo([top.lat, top.lng], 16, { duration: 1.5 });
 
-        searchPinLayerRef.current.clearLayers();
-        const pulseIcon = L.divIcon({
-          html: `
-            <div class="relative flex items-center justify-center">
-              <span class="animate-ping absolute inline-flex h-10 w-10 rounded-full bg-amber-400 opacity-75"></span>
-              <div class="relative w-6 h-6 bg-amber-500 rounded-full border-2 border-white shadow-xl flex items-center justify-center text-[10px] text-white font-bold">
-                📍
+        if (searchPinLayerRef.current) {
+          searchPinLayerRef.current.clearLayers();
+          const searchIcon = L.divIcon({
+            html: `
+              <div class="relative flex flex-col items-center">
+                <div class="bg-rose-600 text-white font-bold text-xs px-2.5 py-1 rounded-lg shadow-xl border border-white whitespace-nowrap">
+                  ${top.building || top.address}
+                </div>
+                <div class="w-3 h-3 bg-rose-600 transform rotate-45 -mt-1.5 shadow"></div>
               </div>
-            </div>
-          `,
-          className: 'pulse-search-pin',
-          iconSize: [40, 40],
-          iconAnchor: [20, 20],
-        });
-        const m = L.marker([top.lat, top.lng], { icon: pulseIcon }).addTo(searchPinLayerRef.current);
-        m.bindPopup(`<b>${top.address}</b>`).openPopup();
+            `,
+            className: 'custom-search-pin',
+            iconSize: [120, 40],
+            iconAnchor: [60, 40],
+          });
+
+          L.marker([top.lat, top.lng], { icon: searchIcon }).addTo(searchPinLayerRef.current);
+        }
       }
-    } catch {
-      // ignore
     } finally {
       setIsSearching(false);
     }
   };
 
-  const jumpToTown = (town: string) => {
-    setSelectedTown(town);
-    if (SG_TOWN_COORDINATES[town] && mapInstanceRef.current) {
-      const c = SG_TOWN_COORDINATES[town];
-      mapInstanceRef.current.flyTo([c.lat, c.lng], 14, { duration: 1.2 });
+  // Jump directly to Town Center
+  const jumpToTown = (townName: string) => {
+    setSelectedTown(townName);
+    const coords = SG_TOWN_COORDINATES[townName.toUpperCase()];
+    if (coords && mapInstanceRef.current) {
+      mapInstanceRef.current.flyTo([coords.lat, coords.lng], 14, { duration: 1.2 });
+    }
+  };
+
+  // Calculate OneMap SLA Route (e.g. from current block to Raffles Place / CBD)
+  const handleCalculateRoute = async (startLat: number, startLng: number, routeType: 'walk' | 'drive' | 'pt') => {
+    // Raffles Place (CBD / financial center coordinates)
+    const endLat = 1.284349;
+    const endLng = 103.851072;
+    const destName = 'Raffles Place / CBD';
+
+    setRouteInfo({
+      distanceKm: 0,
+      durationMins: 0,
+      routeType,
+      destinationName: destName,
+      isLoading: true,
+    });
+
+    try {
+      const routeRes: OneMapRouteResult = await getOneMapRoute(startLat, startLng, endLat, endLng, routeType);
+
+      if (routeRes.route_summary && mapInstanceRef.current) {
+        const distKm = Number((routeRes.route_summary.total_distance / 1000).toFixed(2));
+        const durMins = Math.round(routeRes.route_summary.total_time / 60);
+
+        setRouteInfo({
+          distanceKm: distKm,
+          durationMins: durMins,
+          routeType,
+          destinationName: destName,
+          isLoading: false,
+        });
+
+        // Draw Route Geometry if available
+        if (routeRes.route_geometry) {
+          if (routeLayerRef.current) {
+            routeLayerRef.current.remove();
+          }
+          const coords = decodePolyline(routeRes.route_geometry);
+          if (coords.length > 0) {
+            const poly = L.polyline(coords, {
+              color: routeType === 'walk' ? '#10b981' : '#3b82f6',
+              weight: 5,
+              opacity: 0.85,
+              dashArray: routeType === 'walk' ? '4, 8' : undefined,
+            }).addTo(mapInstanceRef.current);
+            routeLayerRef.current = poly;
+            mapInstanceRef.current.fitBounds(poly.getBounds(), { padding: [60, 60] });
+          }
+        }
+      } else {
+        setRouteInfo(prev => prev ? {
+          ...prev,
+          isLoading: false,
+          error: routeRes.error || 'Route not found or token expired. Please verify OneMap token.',
+        } : null);
+      }
+    } catch (err: any) {
+      setRouteInfo(prev => prev ? {
+        ...prev,
+        isLoading: false,
+        error: err.message || 'Route service request failed.',
+      } : null);
     }
   };
 
   return (
     <div className="space-y-4">
-      {/* Geocoder Search, OneMap API Token Status & Basemap Selector */}
-      <div className={`p-4 rounded-2xl border shadow-sm space-y-3 transition-colors ${
+      {/* Header Bar */}
+      <div className={`p-4 sm:p-5 rounded-2xl border shadow-xs transition-colors ${
         isDark ? 'bg-slate-850/90 border-slate-800' : 'bg-white border-slate-200'
       }`}>
-        <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-3">
           <div>
             <div className="flex items-center gap-2">
-              <h2 className={`text-base font-bold flex items-center gap-2 ${isDark ? 'text-white' : 'text-slate-900'}`}>
-                <MapPin className="w-5 h-5 text-rose-500" />
-                Singapore OneMap &amp; Auto-Drawing HDB Map
+              <h2 className={`text-lg font-bold flex items-center gap-2 ${isDark ? 'text-white' : 'text-slate-900'}`}>
+                <Compass className="w-5 h-5 text-rose-500" />
+                Singapore OneMap &amp; SLA Spatial Geocoder
               </h2>
-              {/* OneMap Token Badge */}
+
+              {/* OneMap Token Status Pill */}
               <button
-                onClick={() => setShowAuthModal(true)}
-                className={`flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-semibold border transition ${
-                  oneMapStatus.connected
+                onClick={() => {
+                  setAuthError(null);
+                  setAuthSuccess(null);
+                  setShowAuthModal(true);
+                }}
+                className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold border transition cursor-pointer ${
+                  tokenInfo.isValid
                     ? isDark
                       ? 'bg-emerald-500/10 text-emerald-300 border-emerald-500/30 hover:bg-emerald-500/20'
                       : 'bg-emerald-50 text-emerald-700 border-emerald-200 hover:bg-emerald-100'
@@ -438,20 +625,20 @@ export const Tab05MapGeocoder: React.FC<Tab05MapGeocoderProps> = ({
               >
                 <Key className="w-3 h-3 text-amber-400" />
                 <span>
-                  {oneMapStatus.connected 
-                    ? `OneMap SLA Token: Active (${oneMapStatus.hoursRemaining ?? 72}h left)` 
-                    : 'OneMap API: Connect 3-Day Token'}
+                  {tokenInfo.isValid 
+                    ? `OneMap Token: Active (${tokenInfo.hoursRemaining}h left)` 
+                    : 'OneMap API: 3-Day Token'}
                 </span>
               </button>
             </div>
             <p className={`text-xs mt-0.5 ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>
-              Search any Singapore postal code, block, or street. The map geocodes and renders transacted block pins.
+              Search any Singapore postal code, block, or street. Click anywhere on the map to reverse-geocode SLA addresses.
             </p>
           </div>
 
           {/* Progress Indicator */}
           {geocodingProgress.isRunning && (
-            <div className={`flex items-center gap-2 px-3 py-1 rounded-full border text-xs font-mono ${
+            <div className={`flex items-center gap-2 px-3 py-1 rounded-full border text-xs font-mono shrink-0 ${
               isDark ? 'bg-slate-800 border-slate-700 text-slate-300' : 'bg-slate-100 border-slate-300 text-slate-700'
             }`}>
               <RefreshCw className="w-3.5 h-3.5 animate-spin text-rose-500" />
@@ -467,7 +654,7 @@ export const Tab05MapGeocoder: React.FC<Tab05MapGeocoderProps> = ({
           <div className="relative flex-1">
             <input
               type="text"
-              placeholder="Search Singapore Address / Postal / Block (e.g. 458 Tampines St 42, 520458, Cantonment Rd, Bishan St 24)..."
+              placeholder="Search Singapore Address / Postal / Block (e.g. 458 Tampines St 42, 520458, Cantonment Rd, Raffles Place)..."
               value={searchQuery}
               onChange={e => setSearchQuery(e.target.value)}
               className={`w-full text-xs sm:text-sm rounded-xl pl-9 pr-4 py-2.5 border focus:ring-2 focus:ring-rose-500 focus:outline-none transition ${
@@ -490,7 +677,7 @@ export const Tab05MapGeocoder: React.FC<Tab05MapGeocoderProps> = ({
         </form>
 
         {/* Basemap Styles & Precinct Jump Pills */}
-        <div className="flex flex-wrap items-center justify-between gap-2 pt-1 border-t border-slate-800/20 text-xs">
+        <div className="flex flex-wrap items-center justify-between gap-2 pt-2 mt-2 border-t border-slate-800/20 text-xs">
           {/* Quick Town Centroid Jump Pills */}
           <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar py-0.5">
             <span className={`font-medium whitespace-nowrap ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>Precinct:</span>
@@ -498,7 +685,7 @@ export const Tab05MapGeocoder: React.FC<Tab05MapGeocoderProps> = ({
               <button
                 key={town}
                 onClick={() => jumpToTown(town)}
-                className={`px-2.5 py-1 rounded-lg transition font-medium whitespace-nowrap border ${
+                className={`px-2.5 py-1 rounded-lg transition font-medium whitespace-nowrap border cursor-pointer ${
                   selectedTown === town
                     ? 'bg-rose-500 text-white border-rose-500 shadow-xs'
                     : isDark
@@ -512,7 +699,7 @@ export const Tab05MapGeocoder: React.FC<Tab05MapGeocoderProps> = ({
             {selectedTown !== 'ALL' && (
               <button
                 onClick={() => setSelectedTown('ALL')}
-                className="px-2 py-1 rounded-lg text-rose-500 hover:text-rose-600 font-medium underline whitespace-nowrap"
+                className="px-2 py-1 rounded-lg text-rose-500 hover:text-rose-600 font-medium underline whitespace-nowrap cursor-pointer"
               >
                 Show All SG
               </button>
@@ -546,8 +733,8 @@ export const Tab05MapGeocoder: React.FC<Tab05MapGeocoderProps> = ({
         </div>
       </div>
 
-      {/* Map Container & Drawer */}
-      <div className={`relative rounded-2xl overflow-hidden border shadow-xl h-[580px] ${
+      {/* Map Container & Overlays */}
+      <div className={`relative rounded-2xl overflow-hidden border shadow-xl h-[600px] ${
         isDark ? 'border-slate-800 bg-slate-950' : 'border-slate-300 bg-slate-100'
       }`}>
         {/* Leaflet DOM Mount */}
@@ -574,7 +761,108 @@ export const Tab05MapGeocoder: React.FC<Tab05MapGeocoderProps> = ({
             <span className="w-2.5 h-2.5 rounded-full bg-emerald-500"></span>
             <span>&lt; $650k (Entry / Mid)</span>
           </div>
+          <div className="text-[10px] text-slate-400 pt-1 border-t border-slate-800/40">
+            Tip: Click anywhere to reverse-geocode!
+          </div>
         </div>
+
+        {/* Reverse Geocode Click Popup Card */}
+        {clickedLocation && (
+          <div className={`absolute top-4 right-4 z-20 p-4 rounded-2xl border shadow-2xl backdrop-blur-md text-xs max-w-xs animate-in fade-in duration-150 ${
+            isDark 
+              ? 'bg-slate-900/95 border-slate-700 text-slate-100' 
+              : 'bg-white/95 border-slate-200 text-slate-800'
+          }`}>
+            <div className="flex items-start justify-between">
+              <div className="flex items-center gap-1.5 text-amber-500 font-bold">
+                <MapPin className="w-4 h-4" />
+                <span>OneMap Reverse Geocode</span>
+              </div>
+              <button
+                onClick={() => setClickedLocation(null)}
+                className={`p-1 rounded-lg ${isDark ? 'text-slate-400 hover:text-white' : 'text-slate-500 hover:text-slate-900'}`}
+              >
+                ✕
+              </button>
+            </div>
+
+            {clickedLocation.isLoading ? (
+              <div className="flex items-center gap-2 py-3 text-slate-400">
+                <RefreshCw className="w-4 h-4 animate-spin text-amber-500" />
+                <span>Querying OneMap SLA address...</span>
+              </div>
+            ) : (
+              <div className="mt-2 space-y-1.5">
+                <div className={`font-bold text-sm ${isDark ? 'text-white' : 'text-slate-900'}`}>
+                  {clickedLocation.building || clickedLocation.address || 'Singapore Coordinate'}
+                </div>
+                {clickedLocation.postal && (
+                  <div className="text-xs text-rose-500 font-mono font-semibold">
+                    Postal Code: S({clickedLocation.postal})
+                  </div>
+                )}
+                <div className="text-[10px] text-slate-400 font-mono">
+                  {clickedLocation.lat.toFixed(6)}, {clickedLocation.lng.toFixed(6)}
+                </div>
+
+                <div className="pt-2 flex gap-2">
+                  <button
+                    onClick={() => handleCalculateRoute(clickedLocation.lat, clickedLocation.lng, 'walk')}
+                    className="flex-1 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-semibold text-[11px] flex items-center justify-center gap-1 cursor-pointer"
+                  >
+                    <Footprints className="w-3 h-3" />
+                    <span>Route to CBD</span>
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Route Calculation Result Overlay */}
+        {routeInfo && (
+          <div className={`absolute top-20 right-4 z-20 p-3.5 rounded-2xl border shadow-xl backdrop-blur-md text-xs max-w-xs animate-in fade-in duration-200 ${
+            isDark 
+              ? 'bg-slate-900/95 border-emerald-500/40 text-slate-100' 
+              : 'bg-white/95 border-emerald-300 text-slate-800'
+          }`}>
+            <div className="flex items-center justify-between font-bold text-emerald-500 pb-1 border-b border-slate-800/40">
+              <span className="flex items-center gap-1.5">
+                <Route className="w-4 h-4" />
+                OneMap SLA Routing
+              </span>
+              <button
+                onClick={() => setRouteInfo(null)}
+                className="text-slate-400 hover:text-white"
+              >
+                ✕
+              </button>
+            </div>
+
+            {routeInfo.isLoading ? (
+              <div className="flex items-center gap-2 py-2 text-slate-400">
+                <RefreshCw className="w-4 h-4 animate-spin text-emerald-500" />
+                <span>Computing SLA route...</span>
+              </div>
+            ) : routeInfo.error ? (
+              <div className="text-rose-400 py-1.5 text-[11px]">
+                {routeInfo.error}
+              </div>
+            ) : (
+              <div className="space-y-1 pt-1.5">
+                <div className="text-[11px] text-slate-400">Destination: {routeInfo.destinationName}</div>
+                <div className="flex items-baseline justify-between">
+                  <div className="text-base font-black text-emerald-500 font-mono">
+                    ~{routeInfo.durationMins} mins
+                  </div>
+                  <div className="text-xs text-slate-400 font-mono">
+                    {routeInfo.distanceKm} km ({routeInfo.routeType})
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
 
         {/* Selected Block Info Drawer */}
         {selectedBlockData && (
@@ -620,8 +908,26 @@ export const Tab05MapGeocoder: React.FC<Tab05MapGeocoderProps> = ({
               </div>
             </div>
 
+            {/* SLA Routing Action */}
+            <div className="mt-2.5 pt-2 border-t border-slate-800/40 flex gap-2">
+              <button
+                onClick={() => handleCalculateRoute(selectedBlockData.lat, selectedBlockData.lng, 'walk')}
+                className="flex-1 py-1.5 rounded-lg bg-emerald-600/90 hover:bg-emerald-600 text-white font-semibold text-[11px] flex items-center justify-center gap-1 cursor-pointer"
+              >
+                <Footprints className="w-3 h-3" />
+                <span>Walk to CBD</span>
+              </button>
+              <button
+                onClick={() => handleCalculateRoute(selectedBlockData.lat, selectedBlockData.lng, 'drive')}
+                className="flex-1 py-1.5 rounded-lg bg-blue-600/90 hover:bg-blue-600 text-white font-semibold text-[11px] flex items-center justify-center gap-1 cursor-pointer"
+              >
+                <Car className="w-3 h-3" />
+                <span>Drive to CBD</span>
+              </button>
+            </div>
+
             {/* List of transactions in this block */}
-            <div className="mt-3 max-h-40 overflow-y-auto space-y-2 pr-1">
+            <div className="mt-3 max-h-36 overflow-y-auto space-y-2 pr-1">
               {selectedBlockData.flats.map(flat => (
                 <div
                   key={flat._id}
@@ -654,7 +960,7 @@ export const Tab05MapGeocoder: React.FC<Tab05MapGeocoderProps> = ({
       {/* OneMap Token Authentication / Minting Modal */}
       {showAuthModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-xs animate-in fade-in duration-150">
-          <div className={`max-w-md w-full rounded-2xl p-6 border shadow-2xl space-y-4 ${
+          <div className={`max-w-lg w-full rounded-2xl p-6 border shadow-2xl space-y-4 ${
             isDark ? 'bg-slate-900 border-slate-700 text-slate-100' : 'bg-white border-slate-200 text-slate-800'
           }`}>
             <div className="flex items-start justify-between">
@@ -664,40 +970,80 @@ export const Tab05MapGeocoder: React.FC<Tab05MapGeocoderProps> = ({
                 </div>
                 <div>
                   <h3 className={`text-base font-bold ${isDark ? 'text-white' : 'text-slate-900'}`}>
-                    OneMap API 3-Day Token
+                    OneMap API 3-Day Token Manager
                   </h3>
                   <p className="text-[11px] text-slate-400">
-                    Singapore Land Authority (SLA) Authentication
+                    Singapore Land Authority (SLA) Official API Integration
                   </p>
                 </div>
               </div>
               <button
                 onClick={() => setShowAuthModal(false)}
-                className={`p-1.5 rounded-lg ${isDark ? 'text-slate-400 hover:text-white bg-slate-800' : 'text-slate-500 hover:text-slate-900 bg-slate-100'}`}
+                className={`p-1.5 rounded-lg cursor-pointer ${isDark ? 'text-slate-400 hover:text-white bg-slate-800' : 'text-slate-500 hover:text-slate-900 bg-slate-100'}`}
               >
                 ✕
               </button>
             </div>
 
-            <div className={`p-3 rounded-xl border text-xs space-y-1.5 ${
-              isDark ? 'bg-slate-800/60 border-slate-700 text-slate-300' : 'bg-slate-50 border-slate-200 text-slate-600'
-            }`}>
-              <div className="flex items-center gap-1.5 font-semibold text-rose-500">
-                <Info className="w-3.5 h-3.5" />
-                <span>Endpoint: /api/auth/post/getToken</span>
-              </div>
-              <p className="text-[11px]">
-                OneMap tokens are minted via <code className="font-mono text-amber-400">POST https://www.onemap.gov.sg/api/auth/post/getToken</code> and remain active for <strong>3 days</strong> (72 hours).
-              </p>
+            {/* Modal Tabs */}
+            <div className={`flex border-b text-xs ${isDark ? 'border-slate-800' : 'border-slate-200'}`}>
+              <button
+                onClick={() => setAuthTab('mint')}
+                className={`pb-2 px-3 font-semibold border-b-2 transition cursor-pointer ${
+                  authTab === 'mint'
+                    ? 'border-rose-500 text-rose-500'
+                    : 'border-transparent text-slate-400 hover:text-slate-200'
+                }`}
+              >
+                Mint 3-Day Token
+              </button>
+              <button
+                onClick={() => setAuthTab('paste')}
+                className={`pb-2 px-3 font-semibold border-b-2 transition cursor-pointer ${
+                  authTab === 'paste'
+                    ? 'border-rose-500 text-rose-500'
+                    : 'border-transparent text-slate-400 hover:text-slate-200'
+                }`}
+              >
+                Paste SLA Token
+              </button>
+              <button
+                onClick={() => setAuthTab('endpoints')}
+                className={`pb-2 px-3 font-semibold border-b-2 transition cursor-pointer ${
+                  authTab === 'endpoints'
+                    ? 'border-rose-500 text-rose-500'
+                    : 'border-transparent text-slate-400 hover:text-slate-200'
+                }`}
+              >
+                SLA Endpoints
+              </button>
             </div>
 
-            {/* Current Status */}
-            {oneMapStatus.connected && (
-              <div className="p-3 rounded-xl bg-emerald-500/10 border border-emerald-500/30 text-xs text-emerald-400 flex items-center gap-2">
-                <CheckCircle2 className="w-4 h-4 shrink-0" />
+            {/* Current Status Banner */}
+            {tokenInfo.isValid ? (
+              <div className="p-3 rounded-xl bg-emerald-500/10 border border-emerald-500/30 text-xs text-emerald-400 flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <CheckCircle2 className="w-4 h-4 shrink-0 text-emerald-400" />
+                  <div>
+                    <span className="font-bold">Active SLA Token: </span>
+                    Valid for ~{tokenInfo.hoursRemaining} more hours.
+                    {tokenInfo.email && <span className="opacity-80 block text-[11px]">Account: {tokenInfo.email}</span>}
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={handleClearToken}
+                  className="px-2 py-1 rounded-lg bg-rose-500/20 text-rose-400 hover:bg-rose-500/30 text-[10px] font-semibold flex items-center gap-1 cursor-pointer"
+                >
+                  <Trash2 className="w-3 h-3" />
+                  <span>Disconnect</span>
+                </button>
+              </div>
+            ) : (
+              <div className="p-3 rounded-xl bg-amber-500/10 border border-amber-500/30 text-xs text-amber-400 flex items-center gap-2">
+                <Info className="w-4 h-4 shrink-0" />
                 <div>
-                  <span className="font-bold">Active Token: </span>
-                  Valid for ~{oneMapStatus.hoursRemaining ?? 72} more hours. Official SLA cadastral tiles and geocoding active.
+                  No active token found. Mint or paste a 3-day token for official SLA geocoding, reverse geocoding, and multi-modal routing.
                 </div>
               </div>
             )}
@@ -716,75 +1062,158 @@ export const Tab05MapGeocoder: React.FC<Tab05MapGeocoderProps> = ({
               </div>
             )}
 
-            {/* Form */}
-            <form onSubmit={handleMintToken} className="space-y-3 pt-1">
-              <div>
-                <label className="block text-xs font-semibold mb-1">
-                  OneMap Account Email
-                </label>
-                <div className="relative">
-                  <input
-                    type="email"
+            {/* TAB 1: MINT WITH CREDENTIALS */}
+            {authTab === 'mint' && (
+              <form onSubmit={handleMintToken} className="space-y-3 pt-1">
+                <div>
+                  <label className="block text-xs font-semibold mb-1">
+                    OneMap Account Email
+                  </label>
+                  <div className="relative">
+                    <input
+                      type="email"
+                      required
+                      value={authEmail}
+                      onChange={e => setAuthEmail(e.target.value)}
+                      placeholder="xk3lvin@gmail.com"
+                      className={`w-full text-xs rounded-xl pl-9 pr-3 py-2 border focus:ring-2 focus:ring-rose-500 ${
+                        isDark 
+                          ? 'bg-slate-950 border-slate-700 text-white' 
+                          : 'bg-slate-50 border-slate-300 text-slate-900'
+                      }`}
+                    />
+                    <Mail className="w-4 h-4 text-slate-400 absolute left-3 top-2.5" />
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-semibold mb-1">
+                    OneMap Account Password
+                  </label>
+                  <div className="relative">
+                    <input
+                      type="password"
+                      required
+                      value={authPassword}
+                      onChange={e => setAuthPassword(e.target.value)}
+                      placeholder="••••••••••••"
+                      className={`w-full text-xs rounded-xl pl-9 pr-3 py-2 border focus:ring-2 focus:ring-rose-500 ${
+                        isDark 
+                          ? 'bg-slate-950 border-slate-700 text-white' 
+                          : 'bg-slate-50 border-slate-300 text-slate-900'
+                      }`}
+                    />
+                    <Lock className="w-4 h-4 text-slate-400 absolute left-3 top-2.5" />
+                  </div>
+                  <p className="text-[10px] text-slate-400 mt-1">
+                    Directly authenticates via SLA OneMap with 3-day validity. Protected against HTML response errors.
+                  </p>
+                </div>
+
+                <div className="flex gap-2 pt-2">
+                  <button
+                    type="submit"
+                    disabled={isMintingToken}
+                    className="flex-1 py-2.5 rounded-xl bg-rose-600 hover:bg-rose-500 active:scale-95 text-white text-xs font-bold transition flex items-center justify-center gap-1.5 shadow-md disabled:opacity-50 cursor-pointer"
+                  >
+                    {isMintingToken ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Key className="w-4 h-4" />}
+                    <span>{isMintingToken ? 'Minting 3-Day Token...' : 'Mint OneMap Token'}</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setShowAuthModal(false)}
+                    className={`px-4 py-2.5 rounded-xl border text-xs font-semibold cursor-pointer ${
+                      isDark 
+                        ? 'bg-slate-800 hover:bg-slate-700 text-slate-300 border-slate-700' 
+                        : 'bg-slate-100 hover:bg-slate-200 text-slate-700 border-slate-300'
+                    }`}
+                  >
+                    Close
+                  </button>
+                </div>
+              </form>
+            )}
+
+            {/* TAB 2: PASTE DIRECT TOKEN */}
+            {authTab === 'paste' && (
+              <form onSubmit={handleSavePastedToken} className="space-y-3 pt-1">
+                <div>
+                  <label className="block text-xs font-semibold mb-1">
+                    Existing OneMap API Token
+                  </label>
+                  <textarea
+                    rows={3}
                     required
-                    value={authEmail}
-                    onChange={e => setAuthEmail(e.target.value)}
-                    placeholder="e.g. your_email@domain.com"
-                    className={`w-full text-xs rounded-xl pl-9 pr-3 py-2 border focus:ring-2 focus:ring-rose-500 ${
+                    value={pastedToken}
+                    onChange={e => setPastedToken(e.target.value)}
+                    placeholder="Paste your active SLA OneMap token string here..."
+                    className={`w-full text-xs font-mono rounded-xl p-3 border focus:ring-2 focus:ring-rose-500 ${
                       isDark 
                         ? 'bg-slate-950 border-slate-700 text-white' 
                         : 'bg-slate-50 border-slate-300 text-slate-900'
                     }`}
                   />
-                  <Mail className="w-4 h-4 text-slate-400 absolute left-3 top-2.5" />
+                  <p className="text-[10px] text-slate-400 mt-1">
+                    If you already generated a token from the OneMap Developer Portal, paste it here to activate all SLA services immediately.
+                  </p>
                 </div>
-              </div>
 
-              <div>
-                <label className="block text-xs font-semibold mb-1">
-                  OneMap Account Password
-                </label>
-                <div className="relative">
-                  <input
-                    type="password"
-                    required
-                    value={authPassword}
-                    onChange={e => setAuthPassword(e.target.value)}
-                    placeholder="••••••••••••"
-                    className={`w-full text-xs rounded-xl pl-9 pr-3 py-2 border focus:ring-2 focus:ring-rose-500 ${
+                <div className="flex gap-2 pt-2">
+                  <button
+                    type="submit"
+                    className="flex-1 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 active:scale-95 text-white text-xs font-bold transition flex items-center justify-center gap-1.5 shadow-md cursor-pointer"
+                  >
+                    <CheckCircle2 className="w-4 h-4" />
+                    <span>Save &amp; Activate Token</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setShowAuthModal(false)}
+                    className={`px-4 py-2.5 rounded-xl border text-xs font-semibold cursor-pointer ${
                       isDark 
-                        ? 'bg-slate-950 border-slate-700 text-white' 
-                        : 'bg-slate-50 border-slate-300 text-slate-900'
+                        ? 'bg-slate-800 hover:bg-slate-700 text-slate-300 border-slate-700' 
+                        : 'bg-slate-100 hover:bg-slate-200 text-slate-700 border-slate-300'
                     }`}
-                  />
-                  <Lock className="w-4 h-4 text-slate-400 absolute left-3 top-2.5" />
+                  >
+                    Close
+                  </button>
                 </div>
-                <p className="text-[10px] text-slate-400 mt-1">
-                  Credentials are sent only to the local proxy to exchange with OneMap and are never stored in client state.
-                </p>
-              </div>
+              </form>
+            )}
 
-              <div className="flex gap-2 pt-2">
-                <button
-                  type="submit"
-                  disabled={isMintingToken}
-                  className="flex-1 py-2.5 rounded-xl bg-rose-600 hover:bg-rose-500 active:scale-95 text-white text-xs font-bold transition flex items-center justify-center gap-1.5 shadow-md disabled:opacity-50 cursor-pointer"
-                >
-                  {isMintingToken ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Key className="w-4 h-4" />}
-                  <span>{isMintingToken ? 'Minting 3-Day Token...' : 'Mint OneMap Token'}</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setShowAuthModal(false)}
-                  className={`px-4 py-2.5 rounded-xl border text-xs font-semibold ${
-                    isDark 
-                      ? 'bg-slate-800 hover:bg-slate-700 text-slate-300 border-slate-700' 
-                      : 'bg-slate-100 hover:bg-slate-200 text-slate-700 border-slate-300'
-                  }`}
-                >
-                  Close
-                </button>
+            {/* TAB 3: ENDPOINTS REFERENCE */}
+            {authTab === 'endpoints' && (
+              <div className="space-y-2.5 text-xs">
+                <div className={`p-2.5 rounded-xl border font-mono text-[11px] space-y-1 ${
+                  isDark ? 'bg-slate-950 border-slate-800 text-slate-300' : 'bg-slate-50 border-slate-200 text-slate-700'
+                }`}>
+                  <div className="font-bold text-rose-500 font-sans">1. Mint a Token (POST, lasts 3 days):</div>
+                  <div className="text-amber-400 break-all">https://www.onemap.gov.sg/api/auth/post/getToken</div>
+                  <div className="text-[10px] text-slate-400">Body: {`{"email":"...","password":"..."}`}</div>
+                </div>
+
+                <div className={`p-2.5 rounded-xl border font-mono text-[11px] space-y-1 ${
+                  isDark ? 'bg-slate-950 border-slate-800 text-slate-300' : 'bg-slate-50 border-slate-200 text-slate-700'
+                }`}>
+                  <div className="font-bold text-rose-500 font-sans">2. Geocode / Search (Auth header required):</div>
+                  <div className="text-amber-400 break-all">https://www.onemap.gov.sg/api/common/elastic/search?searchVal=...</div>
+                </div>
+
+                <div className={`p-2.5 rounded-xl border font-mono text-[11px] space-y-1 ${
+                  isDark ? 'bg-slate-950 border-slate-800 text-slate-300' : 'bg-slate-50 border-slate-200 text-slate-700'
+                }`}>
+                  <div className="font-bold text-rose-500 font-sans">3. Reverse Geocode (Token required):</div>
+                  <div className="text-amber-400 break-all">https://www.onemap.gov.sg/api/public/revgeocode?location=lat,lng&amp;buffer=40</div>
+                </div>
+
+                <div className={`p-2.5 rounded-xl border font-mono text-[11px] space-y-1 ${
+                  isDark ? 'bg-slate-950 border-slate-800 text-slate-300' : 'bg-slate-50 border-slate-200 text-slate-700'
+                }`}>
+                  <div className="font-bold text-rose-500 font-sans">4. Routing Service (walk | drive | cycle | pt):</div>
+                  <div className="text-amber-400 break-all">https://www.onemap.gov.sg/api/public/routingsvc/route?start=...&amp;end=...&amp;routeType=walk</div>
+                </div>
               </div>
-            </form>
+            )}
           </div>
         </div>
       )}

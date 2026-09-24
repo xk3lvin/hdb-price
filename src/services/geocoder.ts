@@ -8,6 +8,8 @@
  * 4. In-memory & LocalStorage geocoding cache
  */
 
+import { searchOneMap } from './onemapService';
+
 export interface GeocodedLocation {
   lat: number;
   lng: number;
@@ -114,31 +116,25 @@ export async function geocodeHdbBlock(
   const fallback = getDeterministicTownOffset(town, block, street);
 
   try {
-    const query = encodeURIComponent(`BLK ${block} ${street}`);
-    const res = await fetch(
-      `https://www.onemap.gov.sg/api/common/elastic/search?searchVal=${query}&returnGeom=Y&getAddrDetails=Y&pageNum=1`,
-      { signal: AbortSignal.timeout(3000) }
-    );
+    const searchVal = `BLK ${block} ${street}`;
+    const searchRes = await searchOneMap(searchVal, 1);
 
-    if (res.ok) {
-      const data = await res.json();
-      if (data && data.results && data.results.length > 0) {
-        const top = data.results[0];
-        const lat = parseFloat(top.LATITUDE);
-        const lng = parseFloat(top.LONGITUDE);
-        if (!isNaN(lat) && !isNaN(lng)) {
-          const loc: GeocodedLocation = {
-            lat,
-            lng,
-            address: top.ADDRESS || `${block} ${street}`,
-            building: top.BUILDING || '',
-            postalCode: top.POSTAL || '',
-            isApproximate: false,
-          };
-          memoryCache.set(cacheKey, loc);
-          persistCache();
-          return loc;
-        }
+    if (searchRes.results && searchRes.results.length > 0) {
+      const top = searchRes.results[0];
+      const lat = parseFloat(top.LATITUDE);
+      const lng = parseFloat(top.LONGITUDE);
+      if (!isNaN(lat) && !isNaN(lng)) {
+        const loc: GeocodedLocation = {
+          lat,
+          lng,
+          address: top.ADDRESS || `${block} ${street}`,
+          building: top.BUILDING || '',
+          postalCode: top.POSTAL || '',
+          isApproximate: false,
+        };
+        memoryCache.set(cacheKey, loc);
+        persistCache();
+        return loc;
       }
     }
   } catch {
@@ -162,15 +158,9 @@ export async function geocodeHdbBlock(
 export async function searchSingaporeAddress(query: string): Promise<GeocodedLocation[]> {
   if (!query.trim()) return [];
   try {
-    const encoded = encodeURIComponent(query.trim());
-    const res = await fetch(
-      `https://www.onemap.gov.sg/api/common/elastic/search?searchVal=${encoded}&returnGeom=Y&getAddrDetails=Y&pageNum=1`,
-      { signal: AbortSignal.timeout(4000) }
-    );
-    if (!res.ok) return [];
-    const data = await res.json();
-    if (data && data.results) {
-      return data.results.slice(0, 5).map((r: any) => ({
+    const searchRes = await searchOneMap(query.trim(), 1);
+    if (searchRes.results && searchRes.results.length > 0) {
+      return searchRes.results.slice(0, 6).map((r) => ({
         lat: parseFloat(r.LATITUDE),
         lng: parseFloat(r.LONGITUDE),
         address: r.ADDRESS,
@@ -181,19 +171,21 @@ export async function searchSingaporeAddress(query: string): Promise<GeocodedLoc
     }
   } catch {
     // Fallback: check if town name
-    const upper = query.toUpperCase().trim();
-    for (const [townName, coords] of Object.entries(SG_TOWN_COORDINATES)) {
-      if (townName.includes(upper) || upper.includes(townName)) {
-        return [
-          {
-            lat: coords.lat,
-            lng: coords.lng,
-            address: `${townName}, Singapore`,
-            isApproximate: true,
-          },
-        ];
-      }
+  }
+
+  const upper = query.toUpperCase().trim();
+  for (const [townName, coords] of Object.entries(SG_TOWN_COORDINATES)) {
+    if (townName.includes(upper) || upper.includes(townName)) {
+      return [
+        {
+          lat: coords.lat,
+          lng: coords.lng,
+          address: `${townName}, Singapore`,
+          isApproximate: true,
+        },
+      ];
     }
   }
+
   return [];
 }
