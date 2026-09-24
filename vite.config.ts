@@ -4,8 +4,19 @@ import path from 'path';
 import {defineConfig} from 'vite';
 
 export default defineConfig(() => {
+  const onemapToken = 
+    process.env.ONEMAP_API_TOKEN || 
+    process.env.VITE_ONEMAP_TOKEN || 
+    process.env.VITE_ONEMAP_API_TOKEN || 
+    process.env.ONEMAP_TOKEN || 
+    '';
+
   return {
     plugins: [react(), tailwindcss()],
+    define: {
+      'process.env.ONEMAP_API_TOKEN': JSON.stringify(onemapToken),
+      'process.env.VITE_ONEMAP_TOKEN': JSON.stringify(onemapToken),
+    },
     resolve: {
       alias: {
         '@': path.resolve(__dirname, '.'),

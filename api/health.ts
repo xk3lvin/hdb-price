@@ -120,7 +120,14 @@ async function checkOneMapHealth(oneMapToken?: string | null): Promise<ServiceHe
         details: {
           httpStatus: res.status,
           tokenConfigured: Boolean(activeToken),
-          tokenSource: activeToken ? (process.env.VITE_ONEMAP_TOKEN ? 'VITE_ONEMAP_TOKEN' : 'ONEMAP_API_TOKEN') : 'none',
+          tokenSource: activeToken 
+            ? (process.env.ONEMAP_API_TOKEN 
+                ? 'ONEMAP_API_TOKEN' 
+                : (process.env.VITE_ONEMAP_TOKEN 
+                    ? 'VITE_ONEMAP_TOKEN' 
+                    : (process.env.VITE_ONEMAP_API_TOKEN ? 'VITE_ONEMAP_API_TOKEN' : 'ONEMAP_TOKEN'))) 
+            : 'none',
+          tokenLength: activeToken ? activeToken.length : 0,
         },
       };
     }

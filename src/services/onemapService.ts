@@ -26,13 +26,40 @@ let cachedServerToken: string | null = null;
 let serverTokenPromise: Promise<string | null> | null = null;
 
 /**
+ * Helper to resolve token from client-inlined env variables
+ */
+function resolveClientEnvToken(): string | null {
+  try {
+    const fromProcess = 
+      (typeof process !== 'undefined' && process.env?.ONEMAP_API_TOKEN) ||
+      (typeof process !== 'undefined' && process.env?.VITE_ONEMAP_TOKEN) ||
+      (typeof process !== 'undefined' && process.env?.ONEMAP_TOKEN);
+    if (fromProcess && typeof fromProcess === 'string' && fromProcess.trim()) {
+      return fromProcess.trim();
+    }
+  } catch {}
+
+  try {
+    const metaEnv = (import.meta as any).env || {};
+    const fromMeta = 
+      metaEnv.VITE_ONEMAP_TOKEN || 
+      metaEnv.VITE_ONEMAP_API_TOKEN || 
+      metaEnv.ONEMAP_API_TOKEN || 
+      metaEnv.ONEMAP_TOKEN;
+    if (fromMeta && typeof fromMeta === 'string' && fromMeta.trim()) {
+      return fromMeta.trim();
+    }
+  } catch {}
+
+  return null;
+}
+
+/**
  * Initialize OneMap token from environment variable or backend proxy
  */
 export async function initOneMapToken(): Promise<string | null> {
   // Check client env variable first
-  const envToken = 
-    ((import.meta as any).env?.VITE_ONEMAP_TOKEN as string | undefined)?.trim() ||
-    ((import.meta as any).env?.VITE_ONEMAP_API_TOKEN as string | undefined)?.trim();
+  const envToken = resolveClientEnvToken();
 
   if (envToken) {
     return envToken;
@@ -44,7 +71,7 @@ export async function initOneMapToken(): Promise<string | null> {
   serverTokenPromise = (async () => {
     try {
       const res = await safeFetchJson<{ success?: boolean; token?: string }>('/api/onemap/token', {
-        signal: AbortSignal.timeout(3000),
+        signal: AbortSignal.timeout(4000),
       });
       if (res.ok && res.data?.token) {
         cachedServerToken = res.data.token.trim();
@@ -157,10 +184,8 @@ async function safeFetchJson<T = any>(
  * Get active token from environment variable, server cache, or localStorage
  */
 export function getStoredOneMapToken(): OneMapTokenInfo {
-  // 1. Check client environment variable (VITE_ONEMAP_TOKEN or VITE_ONEMAP_API_TOKEN)
-  const envToken = 
-    ((import.meta as any).env?.VITE_ONEMAP_TOKEN as string | undefined)?.trim() ||
-    ((import.meta as any).env?.VITE_ONEMAP_API_TOKEN as string | undefined)?.trim();
+  // 1. Check client environment variable (VITE_ONEMAP_TOKEN or ONEMAP_API_TOKEN)
+  const envToken = resolveClientEnvToken();
 
   if (envToken) {
     return {
