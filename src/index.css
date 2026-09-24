@@ -1,0 +1,70 @@
+@import "tailwindcss";
+
+:root {
+  --color-bg-base: #f8fafc;
+  --color-bg-card: #ffffff;
+  --color-bg-subtle: #f1f5f9;
+  --color-bg-input: #ffffff;
+  --color-border: #e2e8f0;
+  --color-border-subtle: #cbd5e1;
+  --color-text-main: #0f172a;
+  --color-text-muted: #64748b;
+  --color-hover: #f1f5f9;
+}
+
+html.dark {
+  --color-bg-base: #0b1329;
+  --color-bg-card: #131c38;
+  --color-bg-subtle: #0b1329;
+  --color-bg-input: #0b1329;
+  --color-border: #1e293b;
+  --color-border-subtle: #334155;
+  --color-text-main: #f8fafc;
+  --color-text-muted: #94a3b8;
+  --color-hover: #1e293b;
+}
+
+/* Custom Scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: #94a3b844;
+  border-radius: 9999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #94a3b888;
+}
+
+/* Leaflet map custom pin fixes */
+.custom-hdb-pin {
+  background: transparent !important;
+  border: none !important;
+}
+
+.leaflet-popup-content-wrapper {
+  background: #0f172a !important;
+  color: #f8fafc !important;
+  border-radius: 12px !important;
+  border: 1px solid #334155 !important;
+  box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.5) !important;
+}
+
+.leaflet-popup-tip {
+  background: #0f172a !important;
+}
+
+html.light .leaflet-popup-content-wrapper {
+  background: #ffffff !important;
+  color: #0f172a !important;
+  border: 1px solid #e2e8f0 !important;
+  box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.1) !important;
+}
+
+html.light .leaflet-popup-tip {
+  background: #ffffff !important;
+}

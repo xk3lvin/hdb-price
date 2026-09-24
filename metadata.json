@@ -1,0 +1,6 @@
+{
+  "name": "KakiFlats — SG HDB Resale & Budget Explorer",
+  "description": "Interactive Singapore HDB resale flat price explorer, historical price trend visualizer, budget vs floor area & remaining lease analyzer, and automated block geocoder map.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
