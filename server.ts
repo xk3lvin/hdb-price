@@ -4,86 +4,27 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
 import { apiRouter } from './api/index';
+import mcpHandler from './api/mcp.js';
+import hdbResaleHandler from './api/hdb-resale.js';
+import {
+  searchOneMap,
+  routeOneMap,
+  mintOneMapToken,
+  setOneMapToken,
+  getOneMapToken,
+  getOneMapTokenStatus,
+} from './lib/onemap.js';
 
 dotenv.config();
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-interface OneMapTokenCache {
-  accessToken: string;
-  expiryTimestamp: number;
-  email?: string;
-}
-
-let oneMapToken: OneMapTokenCache | null = null;
-
-// Initialize from process.env if VITE_ONEMAP_TOKEN, ONEMAP_API_TOKEN, or ONEMAP_TOKEN is supplied
-const envToken = (process.env.VITE_ONEMAP_TOKEN || process.env.ONEMAP_API_TOKEN || process.env.ONEMAP_TOKEN)?.trim();
-if (envToken) {
-  oneMapToken = {
-    accessToken: envToken,
-    expiryTimestamp: Date.now() + 365 * 24 * 60 * 60 * 1000,
-    email: 'Environment Variable (Pre-configured)',
-  };
-}
-
-/**
- * Mint a token from OneMap API
- * Endpoint: POST https://www.onemap.gov.sg/api/auth/post/getToken
- * JSON Body: {"email": "...", "password": "..."}
- * Validity: 3 days (approx 72 hours)
- */
-async function mintOneMapToken(email: string, pass: string): Promise<OneMapTokenCache> {
-  const res = await fetch('https://www.onemap.gov.sg/api/auth/post/getToken', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ email, password: pass }),
-  });
-
-  const rawText = await res.text();
-  let data: any;
-
-  try {
-    data = JSON.parse(rawText);
-  } catch {
-    const preview = rawText.slice(0, 100).replace(/\s+/g, ' ');
-    throw new Error(`OneMap authentication returned status ${res.status}: ${preview}`);
-  }
-
-  if (!res.ok) {
-    throw new Error(data.error || data.message || `OneMap authentication returned status ${res.status}`);
-  }
-
-  if (!data.access_token) {
-    throw new Error('No access_token found in OneMap authentication response');
-  }
-
-  let expiryMs = Date.now() + 3 * 24 * 60 * 60 * 1000;
-  if (data.expiry_timestamp) {
-    const parsed = Number(data.expiry_timestamp);
-    if (!isNaN(parsed) && parsed > 0) {
-      expiryMs = parsed > 10000000000 ? parsed : parsed * 1000;
-    } else {
-      const d = new Date(data.expiry_timestamp).getTime();
-      if (!isNaN(d)) expiryMs = d;
-    }
-  }
-
-  oneMapToken = {
-    accessToken: data.access_token,
-    expiryTimestamp: expiryMs,
-    email,
-  };
-
-  return oneMapToken;
-}
-
 // Auto-mint if env vars present
 if (process.env.ONEMAP_EMAIL && process.env.ONEMAP_PASSWORD) {
   mintOneMapToken(process.env.ONEMAP_EMAIL, process.env.ONEMAP_PASSWORD)
-    .then(token => console.log('OneMap token auto-minted from environment credentials.'))
-    .catch(err => console.warn('Failed to auto-mint OneMap token:', err.message));
+    .then(() => console.log('OneMap token auto-minted from environment credentials.'))
+    .catch((err: any) => console.warn('Failed to auto-mint OneMap token:', err.message));
 }
 
 async function startServer() {
@@ -91,6 +32,14 @@ async function startServer() {
   const PORT = Number(process.env.PORT) || 3000;
 
   app.use(express.json());
+
+  // MCP Server Endpoints
+  app.post('/api/mcp', mcpHandler);
+  app.get('/api/mcp', mcpHandler);
+
+  // HDB Resale Endpoint
+  app.get('/api/hdb-resale', hdbResaleHandler);
+  app.post('/api/hdb-resale', hdbResaleHandler);
 
   // Mount API health & status router (/api/health, /api/health/ping, /health)
   app.use('/api', apiRouter);
@@ -100,18 +49,7 @@ async function startServer() {
 
   // 1. Check current OneMap token status
   app.get('/api/onemap/status', (_req, res) => {
-    const isExpired = oneMapToken ? Date.now() >= oneMapToken.expiryTimestamp : true;
-    const now = Date.now();
-    const msRemaining = oneMapToken && !isExpired ? Math.max(0, oneMapToken.expiryTimestamp - now) : 0;
-    const hoursRemaining = Math.round(msRemaining / (1000 * 60 * 60));
-
-    res.json({
-      connected: !!oneMapToken && !isExpired,
-      email: oneMapToken?.email || (process.env.ONEMAP_EMAIL ? process.env.ONEMAP_EMAIL : undefined),
-      expiresAt: oneMapToken?.expiryTimestamp,
-      hoursRemaining,
-      hasEnvCredentials: !!(process.env.ONEMAP_EMAIL && process.env.ONEMAP_PASSWORD),
-    });
+    res.json(getOneMapTokenStatus());
   });
 
   // 2. Mint OneMap token endpoint
@@ -151,7 +89,7 @@ async function startServer() {
   // Styles: Default, Night, Grey, Original
   app.get('/api/onemap/tiles/:style/:z/:x/:y.png', async (req, res) => {
     const { style, z, x, y } = req.params;
-    const token = oneMapToken?.accessToken;
+    const token = await getOneMapToken();
 
     const oneMapUrl = `https://www.onemap.gov.sg/maps/tiles/${style}/${z}/${x}/${y}.png`;
 
@@ -185,14 +123,14 @@ async function startServer() {
       }
 
       res.status(tileRes.status).send('Tile not available');
-    } catch (err: any) {
+    } catch {
       res.status(500).send('Error fetching tile');
     }
   });
 
   // 4. Get active OneMap token (from environment variable or server cache)
-  app.get('/api/onemap/token', (req, res) => {
-    const token = oneMapToken?.accessToken || (process.env.VITE_ONEMAP_TOKEN || process.env.ONEMAP_API_TOKEN || process.env.ONEMAP_TOKEN)?.trim() || null;
+  app.get('/api/onemap/token', async (_req, res) => {
+    const token = await getOneMapToken();
     res.json({
       success: Boolean(token),
       token: token || null,
@@ -208,11 +146,7 @@ async function startServer() {
     }
 
     const expiryMs = Number(expiryTimestamp) || Date.now() + 3 * 24 * 60 * 60 * 1000;
-    oneMapToken = {
-      accessToken: token.trim(),
-      expiryTimestamp: expiryMs,
-      email: email?.trim(),
-    };
+    setOneMapToken(token, expiryMs, email);
 
     const hoursRemaining = Math.max(0, Math.round((expiryMs - Date.now()) / (1000 * 60 * 60)));
     res.json({
@@ -222,42 +156,32 @@ async function startServer() {
     });
   });
 
-  // 5. OneMap search proxy
+  // 6. OneMap search proxy
   app.get('/api/onemap/search', async (req, res) => {
     const searchVal = req.query.searchVal as string;
     if (!searchVal) return res.json({ results: [] });
 
     try {
-      const headers: Record<string, string> = {};
-      if (oneMapToken?.accessToken) {
-        headers['Authorization'] = oneMapToken.accessToken;
+      const result = await searchOneMap(searchVal);
+      if (!result.ok) {
+        return res.status(result.status || 500).json({ error: result.error || 'OneMap search failed' });
       }
-      const query = encodeURIComponent(searchVal);
-      const omRes = await fetch(
-        `https://www.onemap.gov.sg/api/common/elastic/search?searchVal=${query}&returnGeom=Y&getAddrDetails=Y&pageNum=1`,
-        { headers }
-      );
-      const rawText = await omRes.text();
-      try {
-        const data = JSON.parse(rawText);
-        return res.json(data);
-      } catch {
-        return res.status(omRes.status).json({ error: 'Invalid response from OneMap search' });
-      }
+      return res.json(result.data);
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }
   });
 
-  // 6. Reverse geocode proxy
+  // 7. Reverse geocode proxy
   app.get('/api/onemap/revgeocode', async (req, res) => {
     const { location, buffer, addressType } = req.query;
     if (!location) return res.status(400).json({ error: 'Location required' });
 
     try {
+      const token = await getOneMapToken();
       const headers: Record<string, string> = {};
-      if (oneMapToken?.accessToken) {
-        headers['Authorization'] = oneMapToken.accessToken;
+      if (token) {
+        headers['Authorization'] = token;
       }
       const buff = buffer || 40;
       const addrType = addressType || 'All';
@@ -277,28 +201,25 @@ async function startServer() {
     }
   });
 
-  // 7. Route calculation proxy
+  // 8. Route calculation proxy
   app.get('/api/onemap/route', async (req, res) => {
-    const { start, end, routeType } = req.query;
+    const { start, end, routeType, mode, date, time } = req.query;
     if (!start || !end) return res.status(400).json({ error: 'Start and end required' });
 
     try {
-      const headers: Record<string, string> = {};
-      if (oneMapToken?.accessToken) {
-        headers['Authorization'] = oneMapToken.accessToken;
+      const result = await routeOneMap({
+        start: String(start),
+        end: String(end),
+        routeType: routeType as string,
+        mode: mode as string,
+        date: date as string,
+        time: time as string,
+      });
+
+      if (!result.ok) {
+        return res.status(result.status || 500).json({ error: result.error || 'OneMap route proxy failed' });
       }
-      const rType = routeType || 'walk';
-      const omRes = await fetch(
-        `https://www.onemap.gov.sg/api/public/routingsvc/route?start=${start}&end=${end}&routeType=${rType}`,
-        { headers }
-      );
-      const rawText = await omRes.text();
-      try {
-        const data = JSON.parse(rawText);
-        return res.json(data);
-      } catch {
-        return res.status(omRes.status).json({ error: 'Invalid response from OneMap route service' });
-      }
+      return res.json(result.data);
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }
