@@ -6,6 +6,7 @@ import dotenv from 'dotenv';
 import { apiRouter } from './api/index';
 import mcpHandler from './api/mcp.js';
 import hdbResaleHandler from './api/hdb-resale.js';
+import askHandler from './api/ask.js';
 import {
   searchOneMap,
   routeOneMap,
@@ -36,6 +37,9 @@ async function startServer() {
   // MCP Server Endpoints
   app.post('/api/mcp', mcpHandler);
   app.get('/api/mcp', mcpHandler);
+
+  // MCP Agent Ask Endpoint
+  app.post('/api/ask', askHandler);
 
   // HDB Resale Endpoint
   app.get('/api/hdb-resale', hdbResaleHandler);

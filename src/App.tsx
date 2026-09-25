@@ -16,7 +16,8 @@ import { Tab04Affordability } from './components/Tab04Affordability';
 import { Tab05MapGeocoder } from './components/Tab05MapGeocoder';
 import { TransactionModal } from './components/TransactionModal';
 import { ApiHealthModal } from './components/ApiHealthModal';
-import { CheckCircle2, Database, Activity } from 'lucide-react';
+import { AskPanel } from './components/AskPanel';
+import { CheckCircle2, Database, Activity, Sparkles } from 'lucide-react';
 
 function AppContent() {
   const { isDark } = useTheme();
@@ -107,6 +108,35 @@ function AppContent() {
         </div>
       )}
 
+      {/* Quick Ask Agent Banner */}
+      {activeTab !== '06' && (
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 mt-3 w-full">
+          <div className={`p-3 rounded-2xl border flex flex-col sm:flex-row items-center justify-between gap-3 transition-colors ${
+            isDark 
+              ? 'bg-gradient-to-r from-rose-950/20 via-slate-800/70 to-slate-900 border-rose-900/30' 
+              : 'bg-gradient-to-r from-rose-50/70 via-white to-amber-50/40 border-rose-200/60 shadow-2xs'
+          }`}>
+            <div className="flex items-center gap-2.5">
+              <div className="w-8 h-8 rounded-xl bg-rose-500/10 text-rose-500 flex items-center justify-center shrink-0">
+                <Sparkles className="w-4 h-4" />
+              </div>
+              <div className="text-xs">
+                <span className={`font-bold ${isDark ? 'text-white' : 'text-slate-900'}`}>Ask Housing &amp; Map Agent</span>
+                <span className={`hidden sm:inline mx-1.5 ${isDark ? 'text-slate-500' : 'text-slate-400'}`}>•</span>
+                <span className={`hidden sm:inline ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>Query prices, postal codes, and routes via Gemini + MCP tools</span>
+              </div>
+            </div>
+            <button
+              onClick={() => setActiveTab('06')}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold text-white bg-rose-600 hover:bg-rose-500 transition shadow-xs cursor-pointer shrink-0"
+            >
+              <span>Ask Agent</span>
+              <span className="text-[10px] font-mono px-1 rounded bg-rose-700/50">06</span>
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Main Tab Content Container */}
       <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-6">
         {activeTab === '01' && (
@@ -151,6 +181,10 @@ function AppContent() {
             onSelectRecord={setSelectedModalRecord}
             targetRecord={targetRecordForMap}
           />
+        )}
+
+        {activeTab === '06' && (
+          <AskPanel />
         )}
       </main>
 

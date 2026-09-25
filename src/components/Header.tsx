@@ -10,7 +10,8 @@ import {
   ShieldCheck, 
   RefreshCw,
   Sun,
-  Moon
+  Moon,
+  Sparkles
 } from 'lucide-react';
 
 interface HeaderProps {
@@ -45,6 +46,7 @@ export const Header: React.FC<HeaderProps> = ({
     { id: '03', label: 'What Budget Buys', icon: Compass, desc: 'Sqm vs remaining lease radar' },
     { id: '04', label: 'Lease & Mortgage', icon: Calculator, desc: 'Bala curve & CPF limits' },
     { id: '05', label: 'Map & Geocoder', icon: MapPin, desc: 'Interactive SG block map' },
+    { id: '06', label: 'Ask Agent', icon: Sparkles, desc: 'Gemini + MCP Tools' },
   ];
 
   return (
