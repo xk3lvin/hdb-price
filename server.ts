@@ -34,9 +34,9 @@ async function startServer() {
 
   app.use(express.json());
 
-  // MCP Server Endpoints
-  app.post('/api/mcp', mcpHandler);
-  app.get('/api/mcp', mcpHandler);
+  // MCP Server Endpoints (support with and without trailing slash, all methods)
+  app.all('/api/mcp', mcpHandler);
+  app.all('/api/mcp/', mcpHandler);
 
   // MCP Agent Ask Endpoint
   app.post('/api/ask', askHandler);

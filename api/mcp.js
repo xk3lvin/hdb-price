@@ -10,7 +10,134 @@ import { searchOneMap, routeOneMap } from '../lib/onemap.js';
 import { fetchHdbResale } from '../lib/hdb.js';
 
 export default async function handler(req, res) {
-  if (req.method !== 'POST') {
+  // CORS headers
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS, DELETE, HEAD');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, Accept, Last-Event-ID, Mcp-Session-Id, Mcp-Protocol-Version');
+
+  if (req.method === 'OPTIONS') {
+    if (typeof res.status === 'function') {
+      return res.status(200).end();
+    } else {
+      res.writeHead(200);
+      return res.end();
+    }
+  }
+
+  const acceptHeader = (req.headers && (req.headers['accept'] || req.headers['Accept'])) || '';
+
+  // If a browser or API client navigates via GET without requesting an SSE event-stream,
+  // return a 200 OK discovery/status response instead of a 405 error.
+  if (req.method === 'GET' && !acceptHeader.includes('text/event-stream')) {
+    const serverInfo = {
+      name: 't3-server',
+      version: '1.0.0',
+      status: 'online',
+      protocol: 'mcp',
+      transport: 'Streamable HTTP',
+      message: 'Singapore OneMap & HDB Resale MCP Server is online and ready for agent connections.',
+      endpoint: '/api/mcp',
+      tools: [
+        {
+          name: 't3_search_address',
+          description:
+            'Returns up to 5 matching Singapore locations with their formatted addresses, postal codes, and coordinates from Singapore OneMap Search API.',
+          parameters: {
+            query: 'string (Search text for a Singapore address, postal code, road name, or building name)',
+          },
+        },
+        {
+          name: 't3_route_between',
+          description:
+            'Returns route navigation details, step-by-step directions, estimated transit duration, and travel distance between two coordinates from Singapore OneMap Routing Service API.',
+          parameters: {
+            start: "string (Starting coordinates 'lat,lng')",
+            end: "string (Destination coordinates 'lat,lng')",
+            mode: "enum ('pt', 'walk', 'cycle', 'drive')",
+          },
+        },
+        {
+          name: 't3_resale_lookup',
+          description:
+            'Returns up to 20 recent Singapore HDB resale flat transactions sorted newest first, including sale price, town, flat model, floor area, and remaining lease from data.gov.sg.',
+          parameters: {
+            town: 'string (optional town name like TAMPINES, BEDOK)',
+            flat_type: 'string (optional flat type like 4 ROOM, 3 ROOM)',
+            max_price: 'number (optional maximum resale price)',
+          },
+        },
+      ],
+    };
+
+    if (acceptHeader.includes('text/html')) {
+      const html = `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>MCP Server - Singapore OneMap &amp; HDB Resale</title>
+  <style>
+    :root { color-scheme: light dark; }
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background: #0f172a; color: #f8fafc; margin: 0; padding: 2rem 1rem; line-height: 1.5; }
+    .card { max-width: 720px; margin: 0 auto; background: #1e293b; border: 1px solid #334155; border-radius: 16px; padding: 2rem; box-shadow: 0 10px 25px -5px rgba(0,0,0,0.3); }
+    .badge { display: inline-flex; align-items: center; gap: 6px; background: rgba(16, 185, 129, 0.15); color: #34d399; border: 1px solid rgba(16, 185, 129, 0.3); padding: 4px 10px; border-radius: 999px; font-size: 0.75rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; }
+    .dot { width: 8px; height: 8px; border-radius: 50%; background: #10b981; }
+    h1 { font-size: 1.5rem; font-weight: 700; margin: 1rem 0 0.5rem; }
+    p { color: #94a3b8; font-size: 0.9rem; margin-top: 0; }
+    .tool { background: #0f172a; border: 1px solid #334155; border-radius: 12px; padding: 1rem; margin-top: 1rem; }
+    .tool-name { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 0.95rem; font-weight: 700; color: #f43f5e; }
+    .tool-desc { font-size: 0.85rem; color: #cbd5e1; margin: 0.4rem 0 0; }
+    .code { font-family: monospace; background: #020617; padding: 0.5rem 0.8rem; border-radius: 8px; font-size: 0.8rem; color: #38bdf8; margin-top: 0.5rem; display: block; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="badge"><span class="dot"></span> Online &amp; Ready</div>
+    <h1>t3-server (MCP Server)</h1>
+    <p>Model Context Protocol (MCP) Streamable HTTP endpoint for Singapore OneMap and data.gov.sg HDB Resale services.</p>
+    <div style="margin-top: 1.5rem;">
+      <strong style="font-size: 0.85rem; text-transform: uppercase; letter-spacing: 0.05em; color: #64748b;">Published Tools (3)</strong>
+      <div class="tool">
+        <div class="tool-name">t3_search_address</div>
+        <div class="tool-desc">Resolves Singapore addresses, postal codes, and landmarks to coordinates using OneMap Search API.</div>
+      </div>
+      <div class="tool">
+        <div class="tool-name">t3_route_between</div>
+        <div class="tool-desc">Calculates routes, travel time, and step-by-step directions (pt, walk, cycle, drive) using OneMap Routing Service.</div>
+      </div>
+      <div class="tool">
+        <div class="tool-name">t3_resale_lookup</div>
+        <div class="tool-desc">Fetches latest Singapore HDB resale flat transactions with town, flat type, and price filters from data.gov.sg.</div>
+      </div>
+    </div>
+    <div style="margin-top: 1.5rem;">
+      <strong style="font-size: 0.85rem; text-transform: uppercase; letter-spacing: 0.05em; color: #64748b;">Connect via Agent / Client</strong>
+      <span class="code">Endpoint URL: https://hdb-price.vercel.app/api/mcp</span>
+    </div>
+  </div>
+</body>
+</html>`;
+      if (typeof res.setHeader === 'function') {
+        res.setHeader('Content-Type', 'text/html; charset=utf-8');
+      }
+      if (typeof res.status === 'function') {
+        return res.status(200).send(html);
+      } else {
+        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+        return res.end(html);
+      }
+    }
+
+    if (typeof res.status === 'function' && typeof res.json === 'function') {
+      return res.status(200).json(serverInfo);
+    } else {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify(serverInfo));
+    }
+  }
+
+  // Reject unsupported HTTP methods
+  if (req.method !== 'POST' && req.method !== 'GET') {
     const errorBody = {
       jsonrpc: '2.0',
       error: { code: -32000, message: 'Method not allowed' },
